@@ -185,7 +185,6 @@ def configure_observation_space_representations(
     rep_Rd = G.representations["R3"]  # Representation on vectors in R^d
     rep_Rd_pseudo = G.representations["R3_pseudo"]  # Representation on pseudo vectors in R^d
     rep_euler_xyz = G.representations["euler_xyz"]  # Representation on Euler angles
-    # TODO: Ensure the limb order in the configuration matches the used order by quadruped gym.
     rep_kin_three = G.representations["kin_chain"]  # Permutation of legs
     rep_Rd_on_limbs = rep_kin_three.tensor(rep_Rd)  # Representation on signals R^d on the limbs
     rep_Rd_on_limbs.name = "Rd_on_limbs"
@@ -197,8 +196,16 @@ def configure_observation_space_representations(
     rep_SO3_flat = escnn_representation_form_mapping(G, rep_SO3_flat)
     rep_SO3_flat.name = "SO3_flat"
 
-    # Create a representation for the z dimension alone of the base position
-    rep_z = escnn_representation_form_mapping(G, {g: rep_Rd(g)[2:3, 2:3] for g in G.elements}, name="base_z")
+    rep_reflection_sign_flipping_scalar = escnn_representation_form_mapping(
+        G,
+        {g: np.array([[round(np.linalg.det(rep_Rd(g)))]], dtype=float) for g in G.elements},
+        name="reflection_sign_flipping_scalar",
+    )
+    rep_invariant_scalar = escnn_representation_form_mapping(
+        G,
+        {g: np.ones((1, 1), dtype=float) for g in G.elements},
+        name="invariant_scalar",
+    )
     # rep_roll = escnn_representation_form_mapping(
     #     G, {g: rep_Rd_pseudo(g)[0:1, 0:1] for g in G.elements}, name="base_roll"
     # )
@@ -210,11 +217,13 @@ def configure_observation_space_representations(
     # )
 
     rep_ctrl_commands_lin = escnn_representation_form_mapping(
-        G, {g: rep_Rd(g)[0:2, 0:2] for g in G.elements}, name="ctrl_commands_lin_xy_dot"
+        G, 
+        {g: rep_Rd(g)[0:2, 0:2] for g in G.elements}, 
+        name="ctrl_commands_lin_xy_dot"
     )
     rep_ctrl_commands_ang = escnn_representation_form_mapping(
-        G,
-        {g: rep_Rd_pseudo(g)[2:3, 2:3] for g in G.elements},
+        G, 
+        {g: rep_Rd_pseudo(g)[2:3, 2:3] for g in G.elements}, 
         name="ctrl_commands_yaw_rate",
     )
 
@@ -225,41 +234,43 @@ def configure_observation_space_representations(
             continue  # Quaternion does not have a left-group action definition.
         elif obs_name == "qvel":
             obs_reps[obs_name] = rep_Rd + rep_Rd_pseudo + rep_TqQ_js  # lin_vel , ang_vel, joint_vel
-        elif obs_name in ["tau_ctrl_setpoint", "actions"]:
-            obs_reps[obs_name] = rep_TqQ_js
-        elif "qpos_js" in obs_name:  # Joint space position configuration
+        elif obs_name == "joints_pos":  # Joint space position configuration
             obs_reps[obs_name] = rep_Q_js
-        elif "qvel_js" in obs_name:  # Joint space velocity configuration
+        elif obs_name == "joints_vel":  # Joint space velocity configuration
             obs_reps[obs_name] = rep_TqQ_js
         elif obs_name == "base_pos":
             obs_reps[obs_name] = rep_Rd
-        elif obs_name == "base_pos_z":
-            obs_reps[obs_name] = rep_z
-        elif "base_lin_vel" in obs_name or "base_lin_acc" in obs_name:  # base_lin_vel / base_lin_vel:base (base frame)
+        elif obs_name == "reflection_sign_flipping_scalar":
+            obs_reps[obs_name] = rep_reflection_sign_flipping_scalar
+        elif obs_name == "invariant_scalar":
+            obs_reps[obs_name] = rep_invariant_scalar
+        elif obs_name == "base_lin_vel" or obs_name == "base_lin_acc":  
             obs_reps[obs_name] = rep_Rd
-        elif "base_ang_vel" in obs_name:
+        elif obs_name == "base_ang_vel":
             obs_reps[obs_name] = rep_Rd_pseudo
-        elif "base_ori_euler_xyz" in obs_name:
+        elif obs_name == "base_ori_euler_xyz":
             obs_reps[obs_name] = rep_euler_xyz
         elif obs_name == "base_ori_quat_wxyz":
             continue  # Quaternion does not have a left-group action definition.
         elif obs_name == "base_ori_SO3":
             obs_reps[obs_name] = rep_SO3_flat
-        elif "feet_pos" in obs_name or "feet_vel" in obs_name:  # feet_pos:frame := feet_pos:world or feet_pos:base
+        elif obs_name == "feet_pos" or obs_name == "feet_vel":  # feet_pos:frame := feet_pos:world or feet_pos:base
             obs_reps[obs_name] = rep_Rd_on_limbs
-        elif obs_name in ["contact_state", "clock_data"]:
+        elif obs_name == "contact_state" or obs_name == "clock_data":
             obs_reps[obs_name] = rep_kin_three
-        elif "contact_forces" in obs_name:
+        elif obs_name == "contact_forces":
             obs_reps[obs_name] = rep_Rd_on_limbs
-        elif "gravity" in obs_name or "imu_acc" in obs_names:
+        elif obs_name == "gravity" or obs_name == "imu_acc":
             obs_reps[obs_name] = rep_Rd
-        elif "imu_gyro" in obs_names:  # Same as angular velocity
+        elif obs_name == "imu_gyro":  # Same as angular velocity
             obs_reps[obs_name] = rep_Rd_pseudo
-        elif "ctrl_commands" in obs_name:
+        elif obs_name == "des_base_lin_vel_xy":
+            obs_reps[obs_name] = rep_ctrl_commands_lin
+        elif obs_name == "des_base_ang_vel_yaw":
+            obs_reps[obs_name] = rep_ctrl_commands_ang
+        elif obs_name == "ctrl_commands":
             obs_reps[obs_name] = rep_ctrl_commands_lin + rep_ctrl_commands_ang
-        elif obs_name in ["position_gains", "velocity_gains", "friction_static", "friction_dynamic", "armature"]:
-            obs_reps[obs_name] = rep_Q_js  # Every joints can have different values!
-        elif "heightmap" in obs_name:
+        elif obs_name == "heightmap":
             heightmap_rows, heightmap_cols = _parse_heightmap_shape(obs_name)
             obs_reps[obs_name] = _heightmap_representation(
                 G,

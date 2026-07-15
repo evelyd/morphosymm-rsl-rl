@@ -145,20 +145,18 @@ The symmetry config is the most important part:
         "base_ang_vel",
         "gravity",
         "ctrl_commands",
-        "qpos_js",
-        "qvel_js",
-        "actions",
+        "joints_pos",
+        "joints_vel",
     ],
     "obs_space_names_critic": [
         "base_lin_vel",
         "base_ang_vel",
         "gravity",
         "ctrl_commands",
-        "qpos_js",
-        "qvel_js",
-        "actions",
+        "joints_pos",
+        "joints_vel",
     ],
-    "action_space_names": ["actions"],
+    "action_space_names": ["joints_vel"],
 }
 ```
 
@@ -200,7 +198,7 @@ A good workflow is:
 1. Print the joint names from your IsaacLab robot/articulation.
 2. Print or inspect the action order used by your action manager.
 3. Put that exact order in `joints_order`.
-4. Make sure `qpos_js`, `qvel_js`, `actions`, and torque-like observations all use the same joint ordering.
+4. Make sure `joints_pos`, `joints_vel`, and the actions all use the same joint ordering.
 
 The code passes `joints_order` into:
 
@@ -210,31 +208,28 @@ load_symmetric_system(robot_name=robot_name, return_robot=False, joint_space_ord
 
 If the names or length do not match the robot description, `morpho_symm` will raise an error.
 
-## Supported Observation and Action Names
+## Supported Representation Names
 
-`symm_utils.py` maps each name to a representation. These are the currently supported names and name patterns.
+`symm_utils.py` maps each name to a representation. These are the currently supported exact names.
 
 ### Joint-Space Quantities
 
 ```text
-qpos_js
-qvel_js
-tau_ctrl_setpoint
-actions
-position_gains
-velocity_gains
-friction_static
-friction_dynamic
-armature
+qvel
+joints_pos
+joints_vel
 ```
 
-Names containing `qpos_js` use the joint position representation. Names containing `qvel_js` use the joint velocity representation. `actions` and `tau_ctrl_setpoint` use the joint velocity/torque-space representation.
+`joints_pos` uses the joint-position representation and `joints_vel` uses the
+joint-velocity representation. Use `joints_vel` for an action tensor with the
+same symmetry action and joint ordering. The composite `qvel` representation is
+base linear velocity, base angular velocity, and joint velocity concatenated in
+that order.
 
 ### Base and IMU Quantities
 
 ```text
 base_pos
-base_pos_z
 base_lin_vel
 base_lin_acc
 base_ang_vel
@@ -243,7 +238,14 @@ base_ori_SO3
 gravity
 imu_acc
 imu_gyro
+reflection_sign_flipping_scalar
+invariant_scalar
 ```
+
+`reflection_sign_flipping_scalar` is a single float that changes sign under
+reflections and stays unchanged under identity and proper rotations.
+
+`invariant_scalar` is a single float that remains unchanged under every symmetry.
 
 Quaternion observations are intentionally skipped because this package does not define a left-group action for them:
 
@@ -264,15 +266,20 @@ contact_forces
 clock_data
 ```
 
-Names containing `feet_pos`, `feet_vel`, or `contact_forces` are treated as limb-indexed vector quantities. `contact_state` and `clock_data` are treated as limb permutations.
+`feet_pos`, `feet_vel`, and `contact_forces` are treated as limb-indexed vector
+quantities. `contact_state` and `clock_data` are treated as limb permutations.
 
 ### Command Quantities
 
 ```text
 ctrl_commands
+des_base_lin_vel_xy
+des_base_ang_vel_yaw
 ```
 
-`ctrl_commands` is represented as planar linear command plus yaw-rate command.
+`des_base_lin_vel_xy` represents only the planar linear-velocity command, while
+`des_base_ang_vel_yaw` represents only the yaw-rate command. `ctrl_commands`
+represents their concatenation in that order.
 
 ### Heightmaps
 
@@ -290,6 +297,10 @@ heightmap:64x32
 
 The heightmap transform assumes a signed-permutation action on the horizontal axes. Axis swaps require compatible row and column coordinate sets.
 
+> **Current limitation:** the dispatcher in `symm_utils.py` checks for the exact
+> name `heightmap`, while the shape parser requires `heightmap:<rows>x<cols>`.
+> Consequently, heightmap observations cannot currently pass both checks.
+
 ## Match Names to Tensor Dimensions
 
 The observation names are not just labels. Their representation sizes must add up to the actual tensor size.
@@ -297,7 +308,7 @@ The observation names are not just labels. Their representation sizes must add u
 For example, if the actor observation is:
 
 ```text
-[base_lin_vel, base_ang_vel, gravity, ctrl_commands, qpos_js, qvel_js, actions]
+[base_lin_vel, base_ang_vel, gravity, ctrl_commands, joints_pos, joints_vel]
 ```
 
 then `obs_space_names_actor` must use the same order:
@@ -308,9 +319,8 @@ then `obs_space_names_actor` must use the same order:
     "base_ang_vel",
     "gravity",
     "ctrl_commands",
-    "qpos_js",
-    "qvel_js",
-    "actions",
+    "joints_pos",
+    "joints_vel",
 ]
 ```
 
