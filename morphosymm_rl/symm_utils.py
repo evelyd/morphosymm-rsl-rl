@@ -270,7 +270,7 @@ def configure_observation_space_representations(
             obs_reps[obs_name] = rep_ctrl_commands_ang
         elif obs_name == "ctrl_commands":
             obs_reps[obs_name] = rep_ctrl_commands_lin + rep_ctrl_commands_ang
-        elif obs_name == "heightmap":
+        elif "heightmap" in obs_name:
             heightmap_rows, heightmap_cols = _parse_heightmap_shape(obs_name)
             obs_reps[obs_name] = _heightmap_representation(
                 G,
