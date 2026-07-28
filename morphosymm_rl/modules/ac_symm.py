@@ -133,14 +133,27 @@ class ActorCriticSymm(ActorCritic):
         assert probs.shape[0] == actions.shape[0]
         return probs
 
+    def act(self, observations, **kwargs):
+        """Sample actions from the given observations (Overrides base ActorCritic)."""
+        self.update_distribution(observations)
+        return self.distribution.sample()
+
     def update_distribution(self, observations):
         """Update the action distribution based on the current observations."""
+        # Unpack TensorDict if using rsl-rl v3.3.0+
+        if hasattr(observations, "keys") and "policy" in observations.keys():
+            observations = observations["policy"]
+
         observations = self.actor_in_type(observations)
         dist_params = self.actor(observations)
         self.distribution = self.action_gaussian.get_distribution(dist_params)
 
     def act_inference(self, observations):
         """Returns the mean action for the given observations during inference."""
+        # Unpack TensorDict if using rsl-rl v3.3.0+
+        if hasattr(observations, "keys") and "policy" in observations.keys():
+            observations = observations["policy"]
+
         observations = self.actor_in_type(observations)
         dist_params = self.actor(observations)
         actions_mean = dist_params.tensor[..., : self.actor_out_type.size]
@@ -148,6 +161,10 @@ class ActorCriticSymm(ActorCritic):
 
     def evaluate(self, critic_observations, **kwargs):
         """Evaluate the value function for the given critic observations."""
+        # Unpack TensorDict if using rsl-rl v3.3.0+
+        if hasattr(critic_observations, "keys") and "critic" in critic_observations.keys():
+            critic_observations = critic_observations["critic"]
+
         critic_observations = self.critic_in_type(critic_observations)
         value = self.critic(critic_observations).tensor
         return value
@@ -165,3 +182,7 @@ class ActorCriticSymm(ActorCritic):
         torch_ac.critic = self.critic.export()
 
         return torch_ac
+
+    def update_normalization(self, observations):
+        """Override base ActorCritic to prevent missing normalization attribute errors."""
+        pass

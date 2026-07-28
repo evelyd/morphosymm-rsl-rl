@@ -88,11 +88,11 @@ class SymmOnPolicyRunner:
         start_it = self.current_learning_iteration
         total_it = start_it + num_learning_iterations
         for it in range(start_it, total_it):
-            
-            if(self.schedule_fixed_to_adaptive_switch is not None): 
+
+            if(self.schedule_fixed_to_adaptive_switch is not None):
                 if it == self.schedule_fixed_to_adaptive_switch:
                     self.alg.schedule = "adaptive"
-                    
+
             start = time.time()
             # Rollout
             with torch.inference_mode():
@@ -285,6 +285,9 @@ class SymmOnPolicyRunner:
         # Initialize the policy
         if self.policy_cfg["class_name"] == "ActorCriticSymm":
             self.policy_cfg.pop("class_name")
+            # Extract observation dimensions from the obs TensorDict
+            num_obs = obs["policy"].shape[-1] if "policy" in obs.keys() else obs.shape[-1]
+            num_critic_obs = obs["critic"].shape[-1] if "critic" in obs.keys() else num_obs
             actor_critic: ActorCriticSymm = ActorCriticSymm(
                 num_obs, num_critic_obs, self.env.num_actions, **self.policy_cfg, **self.morphologycal_symmetries_cfg
             ).to(self.device)
