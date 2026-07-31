@@ -7,6 +7,8 @@ from typing import Sequence
 import numpy as np
 from escnn.group import Group, Representation, directsum
 
+from morpho_symm.nn.test_EMLP import get_kinematic_three_rep_two
+
 
 _HEIGHTMAP_NAME_RE = re.compile(r"^heightmap:(?P<rows>\d+)x(?P<cols>\d+)$")
 
@@ -179,13 +181,34 @@ def configure_observation_space_representations(
     except ImportError as e:
         raise ImportError("morpho_symm package is required to configure observation group representations") from e
 
-    G = load_symmetric_system(robot_name=robot_name, return_robot=False, joint_space_order=joints_order)
+    G = load_symmetric_system(robot_name=robot_name)
     rep_Q_js = G.representations["Q_js"]  # Representation on joint space position coordinates
     rep_TqQ_js = G.representations["TqQ_js"]  # Representation on joint space velocity coordinates
-    rep_Rd = G.representations["R3"]  # Representation on vectors in R^d
-    rep_Rd_pseudo = G.representations["R3_pseudo"]  # Representation on pseudo vectors in R^d
-    rep_euler_xyz = G.representations["euler_xyz"]  # Representation on Euler angles
-    rep_kin_three = G.representations["kin_chain"]  # Permutation of legs
+    rep_Rd = G.representations["Rd"]  # Representation on vectors in R^d
+    rep_Rd_pseudo = G.representations["Rd_pseudo"]  # Representation on pseudo vectors in R^d
+    # rep_euler_xyz = G.representations["euler_xyz"]  # Representation on Euler angles
+    print(f"Loaded robot {robot_name} with {len(G.elements)} symmetry group elements.")
+    # rep_kin_three = G.representations["kin_chain"]  # Permutation of legs
+    # Manually construct the 4D kinematic chain permutation for MorphoSymm 0.1.3
+    # This matrix swaps FL (0) <-> FR (1), and RL (2) <-> RR (3) based on a1.yaml
+    perm_matrix = np.array([
+        [0.0, 1.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+        [0.0, 0.0, 1.0, 0.0]
+    ])
+
+    rep_kin_matrices = {
+        g: np.eye(4) if g == G.identity else perm_matrix
+        for g in G.elements
+    }
+
+    rep_kin_three = escnn_representation_form_mapping(
+        G,
+        rep_kin_matrices,
+        name="kin_chain"
+    )
+    # rep_kin_three = get_kinematic_three_rep_two(G)
     rep_Rd_on_limbs = rep_kin_three.tensor(rep_Rd)  # Representation on signals R^d on the limbs
     rep_Rd_on_limbs.name = "Rd_on_limbs"
     rep_Rd_pseudo_on_limbs = rep_kin_three.tensor(rep_Rd_pseudo)  # Representation on pseudo vect R^d on the limbs
@@ -217,13 +240,13 @@ def configure_observation_space_representations(
     # )
 
     rep_ctrl_commands_lin = escnn_representation_form_mapping(
-        G, 
-        {g: rep_Rd(g)[0:2, 0:2] for g in G.elements}, 
+        G,
+        {g: rep_Rd(g)[0:2, 0:2] for g in G.elements},
         name="ctrl_commands_lin_xy_dot"
     )
     rep_ctrl_commands_ang = escnn_representation_form_mapping(
-        G, 
-        {g: rep_Rd_pseudo(g)[2:3, 2:3] for g in G.elements}, 
+        G,
+        {g: rep_Rd_pseudo(g)[2:3, 2:3] for g in G.elements},
         name="ctrl_commands_yaw_rate",
     )
 
@@ -244,12 +267,12 @@ def configure_observation_space_representations(
             obs_reps[obs_name] = rep_reflection_sign_flipping_scalar
         elif obs_name == "invariant_scalar":
             obs_reps[obs_name] = rep_invariant_scalar
-        elif obs_name == "base_lin_vel" or obs_name == "base_lin_acc":  
+        elif obs_name == "base_lin_vel" or obs_name == "base_lin_acc":
             obs_reps[obs_name] = rep_Rd
         elif obs_name == "base_ang_vel":
             obs_reps[obs_name] = rep_Rd_pseudo
-        elif obs_name == "base_ori_euler_xyz":
-            obs_reps[obs_name] = rep_euler_xyz
+        # elif obs_name == "base_ori_euler_xyz":
+        #     obs_reps[obs_name] = rep_euler_xyz
         elif obs_name == "base_ori_quat_wxyz":
             continue  # Quaternion does not have a left-group action definition.
         elif obs_name == "base_ori_SO3":
