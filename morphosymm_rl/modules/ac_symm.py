@@ -72,10 +72,34 @@ class _ExportedSymmetricActor(nn.Module):
         return actor_output[..., : self.num_actions]
 
 
+class _ActionMean(nn.Module):
+    """Select the action-mean portion of distribution parameters."""
+
+    def __init__(self, num_actions: int) -> None:
+        super().__init__()
+        self.num_actions = num_actions
+
+    def forward(self, actor_output: torch.Tensor) -> torch.Tensor:
+        """Return the action means."""
+        return actor_output[..., : self.num_actions]
+
+
+class _IsaacLabExportPolicy(nn.Module):
+    """Minimal plain-PyTorch policy interface expected by IsaacLab exporters."""
+
+    is_recurrent = False
+
+    def __init__(self, actor: EMLP, num_actions: int) -> None:
+        super().__init__()
+        exported_actor = actor.export()
+        self.actor = nn.Sequential(*exported_actor.children(), _ActionMean(num_actions))
+
+
 class ActorCriticSymm(ActorCritic):
     """Actor-critic with an equivariant actor and an invariant critic."""
 
     is_recurrent = False
+    _ESCNN_CACHE_NAMES = frozenset({"matrix", "expanded_bias"})
 
     def __init__(
         self,
@@ -232,6 +256,27 @@ class ActorCriticSymm(ActorCritic):
         """Disallow calling the actor-critic without selecting actor or critic."""
         raise NotImplementedError
 
+    def load_state_dict(self, state_dict: dict, strict: bool = True) -> bool:
+        """Load learned state while ignoring escnn's mode-dependent linear caches.
+
+        ``escnn.nn.Linear`` adds ``matrix`` and ``expanded_bias`` buffers in
+        evaluation mode and removes them in training mode. Checkpoints therefore
+        contain different keys depending on the mode in which they were saved,
+        even though these buffers are derived from the learned parameters.
+        """
+        was_training = self.training
+        self.train()
+        learned_state = {
+            key: value
+            for key, value in state_dict.items()
+            if key.rsplit(".", maxsplit=1)[-1] not in self._ESCNN_CACHE_NAMES
+        }
+        try:
+            super().load_state_dict(learned_state, strict=strict)
+        finally:
+            self.train(was_training)
+        return True
+
     def get_actor_obs(self, obs: TensorDict) -> torch.Tensor:
         """Flatten the configured policy observation groups."""
         return torch.cat([obs[name] for name in self.obs_groups["policy"]], dim=-1)
@@ -317,3 +362,7 @@ class ActorCriticSymm(ActorCritic):
             normalizer=self.actor_obs_normalizer,
             num_actions=self.actor_out_type.size,
         )
+
+    def export_for_isaaclab(self) -> nn.Module:
+        """Convert the actor to the plain policy interface used by IsaacLab exporters."""
+        return _IsaacLabExportPolicy(self.actor, self.actor_out_type.size)
