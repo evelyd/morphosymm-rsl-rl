@@ -289,7 +289,11 @@ class SymmOnPolicyRunner:
             num_obs = obs["policy"].shape[-1] if "policy" in obs.keys() else obs.shape[-1]
             num_critic_obs = obs["critic"].shape[-1] if "critic" in obs.keys() else num_obs
             actor_critic: ActorCriticSymm = ActorCriticSymm(
-                num_obs, num_critic_obs, self.env.num_actions, **self.policy_cfg, **self.morphologycal_symmetries_cfg
+                obs,
+                self.cfg["obs_groups"],
+                self.env.num_actions,
+                **self.policy_cfg,
+                **self.morphologycal_symmetries_cfg,
             ).to(self.device)
         else:
             actor_critic_class = resolve_callable(self.policy_cfg.pop("class_name"))
