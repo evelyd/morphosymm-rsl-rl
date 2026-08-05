@@ -6,5 +6,6 @@
 """Implementation of runners for environment-agent interaction."""
 
 from .symm_on_policy_runner import SymmOnPolicyRunner
+from .dae_on_policy_runner import DAEOnPolicyRunner
 
-__all__ = ["SymmOnPolicyRunner"]
+__all__ = ["SymmOnPolicyRunner", "DAEOnPolicyRunner"]
