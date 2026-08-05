@@ -426,53 +426,70 @@ class DAEOnPolicyRunner:
             if it % self.cfg["save_interval"] == 0:
                 self.save(os.path.join(self.logger.log_dir, f"model_{it}.pt"))  # type: ignore
 
-                if "dae" in self.task:
-                    dae_save_dict = {
-                        'dae_state_dict': self.alg.dae_model.state_dict(),
-                        'normalizer_state_dict': self.alg.obs_action_normalizer.state_dict()
-                    }
-                    torch.save(dae_save_dict, os.path.join(self.logger.log_dir, 'dae_model_{}.pt'.format(it)))
-
         # Save the final model after training
         if self.logger.log_dir is not None and not self.logger.disable_logs:
             self.save(os.path.join(self.logger.log_dir, f"model_{self.current_learning_iteration}.pt"))
 
     def save(self, path: str, infos: dict | None = None) -> None:
-        # Save model
+        # Save main policy and optimizer
         saved_dict = {
             "model_state_dict": self.alg.policy.state_dict(),
             "optimizer_state_dict": self.alg.optimizer.state_dict(),
             "iter": self.current_learning_iteration,
             "infos": infos,
         }
+
         # Save RND model if used
         if self.alg_cfg["rnd_cfg"]:
             saved_dict["rnd_state_dict"] = self.alg.rnd.state_dict()
             if self.alg.rnd_optimizer:
                 saved_dict["rnd_optimizer_state_dict"] = self.alg.rnd_optimizer.state_dict()
+
+        # Save DAE Models and Normalizer
+        if "dae" in self.task:
+            saved_dict["dae_state_dict"] = self.alg.dae_model.state_dict()
+            saved_dict["dae_optimizer_state_dict"] = self.alg.dae_optimizer.state_dict()
+            saved_dict["normalizer_state_dict"] = self.alg.obs_action_normalizer.state_dict()
+
         torch.save(saved_dict, path)
 
         # Upload model to external logging services
         self.logger.save_model(path, self.current_learning_iteration)
 
     def load(self, path: str, load_optimizer: bool = True, map_location: str | None = None) -> dict:
-        loaded_dict = torch.load(path, weights_only=False, map_location=map_location)
-        # Load model
-        resumed_training = self.alg.policy.load_state_dict(loaded_dict["model_state_dict"])
-        # Load RND model if used
-        if self.alg_cfg["rnd_cfg"]:
-            self.alg.rnd.load_state_dict(loaded_dict["rnd_state_dict"])
-        # Load optimizer if used
-        if load_optimizer and resumed_training:
-            # Algorithm optimizer
-            self.alg.optimizer.load_state_dict(loaded_dict["optimizer_state_dict"])
-            # RND optimizer if used
+            loaded_dict = torch.load(path, weights_only=False, map_location=map_location)
+
+            # Load main policy
+            resumed_training = self.alg.policy.load_state_dict(loaded_dict["model_state_dict"])
+
+            # Load RND model if used
             if self.alg_cfg["rnd_cfg"]:
-                self.alg.rnd_optimizer.load_state_dict(loaded_dict["rnd_optimizer_state_dict"])
-        # Load current learning iteration
-        if resumed_training:
-            self.current_learning_iteration = loaded_dict["iter"]
-        return loaded_dict["infos"]
+                self.alg.rnd.load_state_dict(loaded_dict["rnd_state_dict"])
+
+            # Load main optimizer if used
+            if load_optimizer and resumed_training:
+                self.alg.optimizer.load_state_dict(loaded_dict["optimizer_state_dict"])
+                if self.alg_cfg["rnd_cfg"]:
+                    self.alg.rnd_optimizer.load_state_dict(loaded_dict["rnd_optimizer_state_dict"])
+
+            # Load DAE Models and Normalizer
+            if "dae" in self.task and "dae_state_dict" in loaded_dict:
+                dae_state = loaded_dict["dae_state_dict"]
+
+                # Standard cdae loads perfectly with strict enforcement
+                self.alg.dae_model.load_state_dict(dae_state)
+
+                if load_optimizer and "dae_optimizer_state_dict" in loaded_dict:
+                    self.alg.dae_optimizer.load_state_dict(loaded_dict["dae_optimizer_state_dict"])
+
+                if "normalizer_state_dict" in loaded_dict:
+                    self.alg.obs_action_normalizer.load_state_dict(loaded_dict["normalizer_state_dict"])
+
+            # Load current learning iteration
+            if resumed_training:
+                self.current_learning_iteration = loaded_dict["iter"]
+
+            return loaded_dict["infos"]
 
     def get_inference_policy(self, device: str | None = None) -> callable:
         self.eval_mode()  # Switch to evaluation mode (e.g. for dropout)

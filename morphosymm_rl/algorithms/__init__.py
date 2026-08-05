@@ -8,5 +8,6 @@
 from .ppo_symm_data_augment import PPOSymmDataAugmented
 from .ppo import PPO
 from .ppo_dae_online import PPODAEOnline
+from .ppo_symm_dae_online import PPOSymmDAEOnline
 
-__all__ = ["PPOSymmDataAugmented", "PPO", "PPODAEOnline"]
+__all__ = ["PPOSymmDataAugmented", "PPO", "PPODAEOnline", "PPOSymmDAEOnline"]
