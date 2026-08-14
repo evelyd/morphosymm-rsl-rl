@@ -171,6 +171,9 @@ class DAEOnPolicyRunner:
             device=self.device,
         )
 
+        # Make log dir accessible
+        self.env.unwrapped.log_dir = self.logger.log_dir
+
         self.current_learning_iteration = 0
 
         # Setup for online DAE learning

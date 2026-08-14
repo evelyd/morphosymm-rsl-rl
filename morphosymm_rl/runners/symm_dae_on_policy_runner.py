@@ -42,6 +42,10 @@ class SymmDAEOnPolicyRunner:
         self.alg = self._construct_algorithm(obs)
 
         self.logger = Logger(log_dir=log_dir, cfg=self.cfg, env_cfg=self.env.cfg, num_envs=self.env.num_envs, is_distributed=self.is_distributed, gpu_world_size=self.gpu_world_size, gpu_global_rank=self.gpu_global_rank, device=self.device)
+
+        # Make log dir accessible
+        self.env.unwrapped.log_dir = self.logger.log_dir
+
         self.current_learning_iteration = 0
 
         # Setup for online DAE learning
