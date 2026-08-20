@@ -33,6 +33,35 @@ class SumTree:
             tree_idx = (tree_idx - 1) // 2
             self.tree[tree_idx] += change
 
+    def batch_update(self, tree_indices, priorities):
+        """Update multiple leaves and propagate up the tree in a vectorized manner."""
+        # Calculate the difference for each leaf
+        changes = priorities - self.tree[tree_indices]
+        self.tree[tree_indices] = priorities
+
+        current_indices = tree_indices
+        current_changes = changes
+
+        # Propagate up the tree level-by-level until we hit the root (index 0)
+        while current_indices[0] > 0:
+            # Get parent indices
+            current_indices = (current_indices - 1) // 2
+
+            # Multiple children might share the same parent.
+            # We must aggregate the changes for each unique parent.
+            unique_parents, inverse_indices = np.unique(current_indices, return_inverse=True)
+            parent_changes = np.zeros(len(unique_parents), dtype=changes.dtype)
+
+            # Efficiently add changes together for identical parents
+            np.add.at(parent_changes, inverse_indices, current_changes)
+
+            # Apply to the tree
+            self.tree[unique_parents] += parent_changes
+
+            # Prepare for the next level up
+            current_indices = unique_parents
+            current_changes = parent_changes
+
     def get(self, s):
         # Retrieve the leaf index, priority, and data_idx for a given cumulative sum 's'
         parent_idx = 0
@@ -63,7 +92,7 @@ class SumTree:
 class PrioritizedReplayBuffer:
     """Fixed-size buffer to store experience tuples with prioritization."""
 
-    def __init__(self, obs_dim, action_dim, beta_initial, beta_annealing_steps, buffer_size, device="cpu", alpha=0.6):
+    def __init__(self, obs_dim, action_dim, beta_initial, beta_annealing_steps, buffer_size, device="cuda", alpha=0.6):
         """Initialize a PrioritizedReplayBuffer object.
         Arguments:
             obs_dim (int): Dimension of observations.
@@ -105,17 +134,55 @@ class PrioritizedReplayBuffer:
         # This gives new samples a high probability of being sampled at least once
         initial_priority = self.max_priority
 
-        for i in range(num_new_samples):
-            # Store data in the circular buffer
-            self.states[self.step] = states[i]
-            self.actions[self.step] = actions[i]
-            self.next_states[self.step] = next_states[i]
+        end_step = self.step + num_new_samples
 
-            # Add to SumTree with initial priority, storing the actual index in the data buffer
-            self.tree.add(initial_priority, self.step)
+        if end_step <= self.buffer_size:
+            # If the new samples fit without wrapping around
+            self.states[self.step:end_step] = states
+            self.actions[self.step:end_step] = actions
+            self.next_states[self.step:end_step] = next_states
 
-            self.step = (self.step + 1) % self.buffer_size
-            self.num_samples = min(self.buffer_size, self.num_samples + 1)
+            indices = np.arange(self.step, end_step)
+        else:
+            # If we need to wrap around the circular buffer
+            overflow = end_step - self.buffer_size
+            remain = num_new_samples - overflow
+
+            # Fill to the end of the buffer
+            self.states[self.step:self.buffer_size] = states[:remain]
+            self.actions[self.step:self.buffer_size] = actions[:remain]
+            self.next_states[self.step:self.buffer_size] = next_states[:remain]
+
+            # Wrap around and fill from the beginning
+            self.states[0:overflow] = states[remain:]
+            self.actions[0:overflow] = actions[remain:]
+            self.next_states[0:overflow] = next_states[remain:]
+
+            indices = np.concatenate((np.arange(self.step, self.buffer_size), np.arange(0, overflow)))
+
+        # Ensure initial_priority is an array
+        priorities = np.full(len(indices), initial_priority, dtype=np.float64)
+
+        # Calculate the actual leaf indices in the tree array
+        tree_indices = indices + self.buffer_size - 1
+
+        # Update the tree's internal data mapping
+        self.tree.data_indices[indices] = indices
+
+        # Perform the batch update
+        self.tree.batch_update(tree_indices, priorities)
+
+        # Manually advance the tree's internal pointers (since we bypassed .add())
+        self.tree.data_pointer = (self.tree.data_pointer + len(indices)) % self.buffer_size
+        self.tree.n_entries = min(self.buffer_size, self.tree.n_entries + len(indices))
+
+        # Update buffer step and total samples
+        self.step = end_step % self.buffer_size
+        self.num_samples = min(self.buffer_size, self.num_samples + num_new_samples)
+
+        # Update the step and total number of samples
+        self.step = end_step % self.buffer_size
+        self.num_samples = min(self.num_samples + num_new_samples, self.buffer_size)
 
     def sample(self, mini_batch_size, beta):
         """Sample a batch of experiences with priorities."""
@@ -171,9 +238,9 @@ class PrioritizedReplayBuffer:
         """Preprocess the samples if needed."""
         flat_sample = DhaDynamicsRecording.map_state_action_state(
             sample={
-                "state_observations": batch_states.cpu().numpy(),
-                "action_observations": batch_actions.cpu().numpy(),
-                "next_state_observations": batch_next_states.cpu().numpy()
+                "state_observations": batch_states,
+                "action_observations": batch_actions,
+                "next_state_observations": batch_next_states
             },
             state_observations=["state_observations"],
             action_observations=["action_observations"],
@@ -182,7 +249,7 @@ class PrioritizedReplayBuffer:
         # Convert numpy arrays in flat_sample to torch tensors
         for key, value in flat_sample.items():
             if isinstance(value, np.ndarray):
-                flat_sample[key] = torch.from_numpy(value).to(self.device)
+                flat_sample[key] = value
 
         return flat_sample
 
@@ -200,9 +267,9 @@ class PrioritizedReplayBuffer:
         assert steps_in_pred_horizon > 0, f"Invalid prediction horizon {steps_in_pred_horizon}"
 
         # Ensure inputs are on CPU for numpy conversion
-        states_np = states.cpu().numpy()
-        actions_np = actions.cpu().numpy()
-        next_states_np = next_states.cpu().numpy()
+        states_np = states
+        actions_np = actions
+        next_states_np = next_states
 
         remnant = traj_length % frames_per_step
         frames_in_pred_horizon = steps_in_pred_horizon * frames_per_step
@@ -225,7 +292,7 @@ class PrioritizedReplayBuffer:
             next_obs_time_horizon = next_obs_time_horizon.reshape((num_steps, frames_per_step, next_states_np.shape[1]))
             action_time_horizon = action_time_horizon.reshape((num_steps, frames_per_step, actions_np.shape[1]))
 
-            sample["state_observations"] = torch.from_numpy(obs_time_horizon).to(states.device)
-            sample["action_observations"] = torch.from_numpy(action_time_horizon).to(actions.device)
-            sample["next_state_observations"] = torch.from_numpy(next_obs_time_horizon).to(next_states.device)
+            sample["state_observations"] = obs_time_horizon
+            sample["action_observations"] = action_time_horizon
+            sample["next_state_observations"] = next_obs_time_horizon
             yield sample
