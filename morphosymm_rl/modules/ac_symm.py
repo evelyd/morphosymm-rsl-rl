@@ -117,6 +117,7 @@ class ActorCriticSymm(ActorCritic):
         small_init_output: bool = True,
         obs_space_names_actor: list[str] | tuple[str, ...] | None = None,
         obs_space_names_critic: list[str] | tuple[str, ...] | None = None,
+        obs_space_names_single_state: list[str] | None = None,
         action_space_names: list[str] | tuple[str, ...] | None = None,
         joints_order: list[str] | None = None,
         robot_name: str | None = None,
@@ -159,7 +160,7 @@ class ActorCriticSymm(ActorCritic):
         # loads, this guarantees that actor, critic, and action types share the
         # exact same escnn group instance.
         all_space_names = list(
-            dict.fromkeys([*obs_space_names_actor, *obs_space_names_critic, *action_space_names])
+            dict.fromkeys([*obs_space_names_actor, *obs_space_names_critic, *obs_space_names_single_state, *action_space_names])
         )
         self.G, representations = configure_observation_space_representations(
             robot_name, all_space_names, joints_order
@@ -168,6 +169,7 @@ class ActorCriticSymm(ActorCritic):
         self.num_replica = len(self.G.elements)
         self.actor_in_type = FieldType(gspace, [representations[name] for name in obs_space_names_actor])
         self.critic_in_type = FieldType(gspace, [representations[name] for name in obs_space_names_critic])
+        self.state_type = FieldType(gspace, [representations[name] for name in obs_space_names_single_state])
         self.actor_out_type = FieldType(gspace, [representations[name] for name in action_space_names])
 
         self._validate_dimension("actor observations", actor_obs_dim, self.actor_in_type.size)

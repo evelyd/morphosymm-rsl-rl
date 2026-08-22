@@ -12,7 +12,7 @@ from morphosymm_rl.modules import ActorCriticSymm
 
 
 # Import your new combined algorithm and buffer fill function
-from morphosymm_rl.algorithms import PPOSymmDAEOnline
+from morphosymm_rl.algorithms import PPOSymmDAEOnline, PPOSymmERFF
 from .dae_on_policy_runner import fill_replay_buffer
 
 class SymmDAEOnPolicyRunner:
@@ -49,12 +49,19 @@ class SymmDAEOnPolicyRunner:
         self.current_learning_iteration = 0
 
         # Setup for online DAE learning
-        if "dae" in self.task:
+        if "dae" in self.task or "rff" in self.task:
             if hasattr(self.alg, 'replay_buffer'):
-                correct_koopman_dim = self.single_observation_space * self.koopman_cfg["obs_state_ratio"]
+                if "rff" in self.task:
+                    correct_koopman_dim = self.koopman_cfg["m"]
+                else:
+                    correct_koopman_dim = self.single_observation_space * self.koopman_cfg["obs_state_ratio"]
                 fill_replay_buffer(self.alg, self.env, self.alg.state_dim, correct_koopman_dim)
                 batch_states_raw, batch_actions_raw, batch_next_states_raw, _, _ = self.alg.replay_buffer.sample(len(self.alg.replay_buffer), self.alg.replay_buffer.beta_initial)
                 self.alg.obs_action_normalizer.update(batch_states_raw, batch_actions_raw)
+
+                if "rff" in self.task:
+                    batch_latent_states = self.alg.rff(batch_states_raw.to(self.device))
+                    self.alg.latent_normalizer.update(batch_latent_states)
 
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False) -> None:
                 # Randomize initial episode lengths (for exploration)
@@ -89,7 +96,7 @@ class SymmDAEOnPolicyRunner:
                             # Sample actions
                             actions = self.alg.act(obs)
 
-                            if "dae" in self.task:
+                            if "dae" in self.task or "rff" in self.task:
 
                                 # Collect data for DAE
                                 current_critic_obs_for_dae = obs["critic"]
@@ -103,7 +110,7 @@ class SymmDAEOnPolicyRunner:
                             # Process the step
                             self.alg.process_env_step(obs, rewards, dones, extras)
 
-                            if "dae" in self.task:
+                            if "dae" in self.task or "rff" in self.task:
                                 # Get the next states for the DAE
                                 next_critic_obs_for_dae = obs["critic"]
                                 next_states_for_dae = next_critic_obs_for_dae[:, self.single_observation_space*(self.history_length-1):self.single_observation_space*self.history_length].clone()
@@ -128,7 +135,7 @@ class SymmDAEOnPolicyRunner:
                         stop = time.time()
                         collect_time = stop - start
 
-                        if "dae" in self.task:
+                        if "dae" in self.task or "rff" in self.task:
                             # Anneal beta for Importance Sampling weights
                             current_beta = self.alg.replay_buffer.beta_initial + (1.0 - self.alg.replay_buffer.beta_initial) * \
                                         min(1.0, (it - self.current_learning_iteration) / self.alg.replay_buffer.beta_annealing_steps)
@@ -141,13 +148,23 @@ class SymmDAEOnPolicyRunner:
                             # Perform update of normalizers using only the new data
                             self.alg.obs_action_normalizer.update(batch_states_new, batch_actions_new)
 
+                            if "rff" in self.task:
+                                batch_latent_states_new = self.alg.rff(batch_states_new)
+                                self.alg.latent_normalizer.update(batch_latent_states_new)
+
                         start = stop
 
                         # Compute returns
-                        if "dae" in self.task:
+                        if "dae" in self.task or "koopman" in self.task:
                             self.alg.compute_returns(obs, actions)
                         else:
                             self.alg.compute_returns(obs)
+
+                        if "rff_koopman" in self.task:
+                            koopman_computation_start_time = time.time()
+                            self.alg.koopman_estimator.compute_koopman_op(batch_states_new, batch_actions_new, batch_next_states_new)
+                            pred_error = self.alg.koopman_estimator.compute_pred_error(batch_states_new, batch_actions_new, batch_next_states_new)
+                            koopman_computation_time = time.time() - koopman_computation_start_time
 
                     if "dae" in self.task:
                         # Perform DAE training step
@@ -278,6 +295,15 @@ class SymmDAEOnPolicyRunner:
                         loss_dict["dae_state_rec_loss"] = mean_dae_state_rec_loss
                         loss_dict["dae_state_pred_loss"] = mean_dae_state_pred_loss
                         loss_dict["dae_train_time"] = dae_train_time
+
+                    if "rff_koopman" in self.task:
+                        a_matrix = self.alg.koopman_estimator.K_matrix[:, :self.alg.koopman_estimator.feature_dim].detach()
+                        eigvals = torch.linalg.eigvals(a_matrix)
+
+                        loss_dict["koopman_computation_time"] = koopman_computation_time
+                        loss_dict["koopman_pred_error"] = pred_error
+                        loss_dict["max_eigval"] = torch.max(torch.abs(eigvals)).item()
+                        loss_dict["min_eigval"] = torch.min(torch.abs(eigvals)).item()
 
                     self.current_learning_iteration = it
 
@@ -454,7 +480,10 @@ class SymmDAEOnPolicyRunner:
         self.cfg["obs_groups"]["critic"].append("koopman_prediction")
 
         # Create the Koopman placeholder BEFORE storage initialization so the hack picks it up
-        koopman_dim = self.single_observation_space * self.koopman_cfg["obs_state_ratio"]
+        if "rff" in self.task:
+            koopman_dim = self.koopman_cfg["m"]
+        else:
+            koopman_dim = self.single_observation_space * self.koopman_cfg["obs_state_ratio"]
         num_envs = obs["policy"].shape[0]
         obs.set("koopman_prediction", torch.zeros((num_envs, koopman_dim), device=self.device))
 
@@ -473,13 +502,25 @@ class SymmDAEOnPolicyRunner:
 
         # Initialize combined Algorithm
         self.alg_cfg.pop("class_name", None)
-        alg = PPOSymmDAEOnline(
-            actor_critic, storage, obs,
-            device=self.device, task=self.task, dt=self.dt,
-            single_observation_space=self.single_observation_space,
-            action_space=self.action_space, history_length=self.history_length,
-            koopman_cfg=self.koopman_cfg,
-            multi_gpu_cfg=self.multi_gpu_cfg,
-            **self.alg_cfg, **self.morphologycal_symmetries_cfg
-        )
+
+        if "rff" in self.task:
+            alg = PPOSymmERFF(
+                actor_critic, storage, obs,
+                device=self.device, task=self.task, dt=self.dt,
+                single_observation_space=self.single_observation_space,
+                action_space=self.action_space, history_length=self.history_length,
+                koopman_cfg=self.koopman_cfg,
+                multi_gpu_cfg=self.multi_gpu_cfg,
+                **self.alg_cfg, **self.morphologycal_symmetries_cfg
+            )
+        else:
+            alg = PPOSymmDAEOnline(
+                actor_critic, storage, obs,
+                device=self.device, task=self.task, dt=self.dt,
+                single_observation_space=self.single_observation_space,
+                action_space=self.action_space, history_length=self.history_length,
+                koopman_cfg=self.koopman_cfg,
+                multi_gpu_cfg=self.multi_gpu_cfg,
+                **self.alg_cfg, **self.morphologycal_symmetries_cfg
+            )
         return alg

@@ -12,7 +12,7 @@ import warnings
 from tensordict import TensorDict
 
 
-from morphosymm_rl.algorithms import PPO, PPODAEOnline
+from morphosymm_rl.algorithms import PPO, PPODAEOnline, PPORFF
 from rsl_rl.env import VecEnv
 from rsl_rl.modules import (
     ActorCritic,
@@ -177,7 +177,7 @@ class DAEOnPolicyRunner:
         self.current_learning_iteration = 0
 
         # Setup for online DAE learning
-        if "dae" in self.task:
+        if "dae" in self.task or "rff" in self.task:
 
             # Initialize the replay buffer
             if hasattr(self.alg, 'replay_buffer'): # and env.cfg.mode not in ["play", "test"]:
@@ -186,6 +186,10 @@ class DAEOnPolicyRunner:
                 # Perform initial update of normalizers
                 batch_states_raw, batch_actions_raw, batch_next_states_raw, _, _ = self.alg.replay_buffer.sample(len(self.alg.replay_buffer), self.alg.replay_buffer.beta_initial)
                 self.alg.obs_action_normalizer.update(batch_states_raw, batch_actions_raw)
+
+                if "rff" in self.task:
+                    batch_latent_states = self.alg.rff(batch_states_raw.to(self.device))
+                    self.alg.latent_normalizer.update(batch_latent_states)
 
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False) -> None:
         # Randomize initial episode lengths (for exploration)
@@ -220,7 +224,7 @@ class DAEOnPolicyRunner:
                     # Sample actions
                     actions = self.alg.act(obs)
 
-                    if "dae" in self.task:
+                    if "dae" in self.task or "rff" in self.task:
 
                         # Collect data for DAE
                         current_critic_obs_for_dae = obs["critic"]
@@ -234,7 +238,7 @@ class DAEOnPolicyRunner:
                     # Process the step
                     self.alg.process_env_step(obs, rewards, dones, extras)
 
-                    if "dae" in self.task:
+                    if "dae" in self.task or "rff" in self.task:
                         # Get the next states for the DAE
                         next_critic_obs_for_dae = obs["critic"]
                         next_states_for_dae = next_critic_obs_for_dae[:, self.single_observation_space*(self.history_length-1):self.single_observation_space*self.history_length].clone()
@@ -259,7 +263,7 @@ class DAEOnPolicyRunner:
                 stop = time.time()
                 collect_time = stop - start
 
-                if "dae" in self.task:
+                if "dae" in self.task or "rff" in self.task:
                     # Anneal beta for Importance Sampling weights
                     current_beta = self.alg.replay_buffer.beta_initial + (1.0 - self.alg.replay_buffer.beta_initial) * \
                                 min(1.0, (it - self.current_learning_iteration) / self.alg.replay_buffer.beta_annealing_steps)
@@ -272,13 +276,26 @@ class DAEOnPolicyRunner:
                     # Perform update of normalizers using only the new data
                     self.alg.obs_action_normalizer.update(batch_states_new, batch_actions_new)
 
+                    if "rff" in self.task:
+                        batch_latent_states_new = self.alg.rff(batch_states_new)
+                        self.alg.latent_normalizer.update(batch_latent_states_new)
+
                 start = stop
 
                 # Compute returns
-                if "dae" in self.task:
+                if "dae" in self.task or "koopman" in self.task:
                     self.alg.compute_returns(obs, actions)
                 else:
                     self.alg.compute_returns(obs)
+
+            if "rff_koopman" in self.task:
+                    koopman_computation_start_time = time.time()
+
+                    # Compute using ONLY the newly concatenated data to preserve optimizations
+                    self.alg.koopman_estimator.compute_koopman_op(batch_states_new, batch_actions_new, batch_next_states_new)
+                    pred_error = self.alg.koopman_estimator.compute_pred_error(batch_states_new, batch_actions_new, batch_next_states_new)
+
+                    koopman_computation_time = time.time() - koopman_computation_start_time
 
             if "dae" in self.task:
                 # Perform DAE training step
@@ -409,6 +426,15 @@ class DAEOnPolicyRunner:
                 loss_dict["dae_state_rec_loss"] = mean_dae_state_rec_loss
                 loss_dict["dae_state_pred_loss"] = mean_dae_state_pred_loss
                 loss_dict["dae_train_time"] = dae_train_time
+
+            if "rff_koopman" in self.task:
+                a_matrix = self.alg.koopman_estimator.K_matrix[:, :self.alg.koopman_estimator.feature_dim].detach()
+                eigvals = torch.linalg.eigvals(a_matrix)
+
+                loss_dict["koopman_computation_time"] = koopman_computation_time
+                loss_dict["koopman_pred_error"] = pred_error
+                loss_dict["max_eigval"] = torch.max(torch.abs(eigvals)).item()
+                loss_dict["min_eigval"] = torch.min(torch.abs(eigvals)).item()
 
             self.current_learning_iteration = it
 
@@ -624,6 +650,14 @@ class DAEOnPolicyRunner:
             self.alg_cfg.pop("class_name")  # Remove class name from config to avoid passing it to the constructor
             alg: PPODAEOnline = PPODAEOnline(
                 actor_critic, storage, device=self.device, task=self.task, dt=self.dt, single_observation_space=self.single_observation_space, action_space=self.action_space, history_length=self.history_length, morphologycal_symmetries_cfg=self.morphologycal_symmetries_cfg, koopman_cfg=self.koopman_cfg, **self.alg_cfg
+            )
+        elif self.alg_cfg["class_name"] == "PPORFF":
+            self.alg_cfg.pop("class_name")
+            alg = PPORFF(
+                actor_critic, storage, device=self.device, task=self.task, dt=self.dt,
+                single_observation_space=self.single_observation_space, action_space=self.action_space,
+                history_length=self.history_length, morphologycal_symmetries_cfg=self.morphologycal_symmetries_cfg,
+                koopman_cfg=self.koopman_cfg, **self.alg_cfg
             )
         else:
             alg_class = resolve_callable(self.alg_cfg.pop("class_name"))
