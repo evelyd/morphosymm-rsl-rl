@@ -64,269 +64,283 @@ class SymmDAEOnPolicyRunner:
                     self.alg.latent_normalizer.update(batch_latent_states)
 
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False) -> None:
-                # Randomize initial episode lengths (for exploration)
-                if init_at_random_ep_len:
-                    self.env.episode_length_buf = torch.randint_like(
-                        self.env.episode_length_buf, high=int(self.env.max_episode_length)
-                    )
 
-                # Start learning
-                obs = self.env.get_observations().to(self.device)
-                self.train_mode()  # switch to train mode (for dropout for example)
+        # Save the RFF since they are static and already initialized
+        if "rff" in self.task and self.logger.log_dir is not None:
+            rff_path = os.path.join(self.logger.log_dir, 'rff.pt')
+            torch.save({
+                'rff_state_dict': self.alg.rff.state_dict(),
+                'rff_config': {
+                    'in_features': self.alg.rff.in_features,
+                    'sigma': self.alg.rff.sigma,
+                    'kernel_type': self.alg.rff.kernel_type,
+                    'm': self.alg.rff.m,
+                }
+            }, rff_path)
 
-                # Ensure all parameters are in-synced
-                if self.is_distributed:
-                    print(f"Synchronizing parameters for rank {self.gpu_global_rank}...")
-                    self.alg.broadcast_parameters()
+        # Randomize initial episode lengths (for exploration)
+        if init_at_random_ep_len:
+            self.env.episode_length_buf = torch.randint_like(
+                self.env.episode_length_buf, high=int(self.env.max_episode_length)
+            )
 
-                # Start training
-                start_it = self.current_learning_iteration
-                total_it = start_it + num_learning_iterations
-                for it in range(start_it, total_it):
-                    start = time.time()
+        # Start learning
+        obs = self.env.get_observations().to(self.device)
+        self.train_mode()  # switch to train mode (for dropout for example)
 
-                    # Initialize lists to collect NEW data for online algorithms
-                    new_states_this_iter = []
-                    new_actions_this_iter = []
-                    new_next_states_this_iter = []
+        # Ensure all parameters are in-synced
+        if self.is_distributed:
+            print(f"Synchronizing parameters for rank {self.gpu_global_rank}...")
+            self.alg.broadcast_parameters()
 
-                    # Rollout
-                    with torch.inference_mode():
-                        for _ in range(self.cfg["num_steps_per_env"]):
-                            # Sample actions
-                            actions = self.alg.act(obs)
+        # Start training
+        start_it = self.current_learning_iteration
+        total_it = start_it + num_learning_iterations
+        for it in range(start_it, total_it):
+            start = time.time()
 
-                            if "dae" in self.task or "rff" in self.task:
+            # Initialize lists to collect NEW data for online algorithms
+            new_states_this_iter = []
+            new_actions_this_iter = []
+            new_next_states_this_iter = []
 
-                                # Collect data for DAE
-                                current_critic_obs_for_dae = obs["critic"]
-                                current_states_for_dae = current_critic_obs_for_dae[:, self.single_observation_space*(self.history_length-1):self.single_observation_space*self.history_length].clone()
-                                current_actions_for_dae = actions.clone()
+            # Rollout
+            with torch.inference_mode():
+                for _ in range(self.cfg["num_steps_per_env"]):
+                    # Sample actions
+                    actions = self.alg.act(obs)
 
-                            # Step the environment
-                            obs, rewards, dones, extras = self.env.step(actions.to(self.env.device))
-                            # Move to device
-                            obs, rewards, dones = (obs.to(self.device), rewards.to(self.device), dones.to(self.device))
-                            # Process the step
-                            self.alg.process_env_step(obs, rewards, dones, extras)
+                    if "dae" in self.task or "rff" in self.task:
 
-                            if "dae" in self.task or "rff" in self.task:
-                                # Get the next states for the DAE
-                                next_critic_obs_for_dae = obs["critic"]
-                                next_states_for_dae = next_critic_obs_for_dae[:, self.single_observation_space*(self.history_length-1):self.single_observation_space*self.history_length].clone()
+                        # Collect data for DAE
+                        current_critic_obs_for_dae = obs["critic"]
+                        current_states_for_dae = current_critic_obs_for_dae[:, self.single_observation_space*(self.history_length-1):self.single_observation_space*self.history_length].clone()
+                        current_actions_for_dae = actions.clone()
 
-                                # Add to our new data collection
-                                new_states_this_iter.append(current_states_for_dae)
-                                new_actions_this_iter.append(current_actions_for_dae)
-                                new_next_states_this_iter.append(next_states_for_dae)
+                    # Step the environment
+                    obs, rewards, dones, extras = self.env.step(actions.to(self.env.device))
+                    # Move to device
+                    obs, rewards, dones = (obs.to(self.device), rewards.to(self.device), dones.to(self.device))
+                    # Process the step
+                    self.alg.process_env_step(obs, rewards, dones, extras)
 
-                                # Fill the PER buffer
-                                self.alg.replay_buffer.insert(
-                                    current_states_for_dae,
-                                    current_actions_for_dae,
-                                    next_states_for_dae,
-                                )
+                    if "dae" in self.task or "rff" in self.task:
+                        # Get the next states for the DAE
+                        next_critic_obs_for_dae = obs["critic"]
+                        next_states_for_dae = next_critic_obs_for_dae[:, self.single_observation_space*(self.history_length-1):self.single_observation_space*self.history_length].clone()
 
-                            # Extract intrinsic rewards (only for logging)
-                            intrinsic_rewards = self.alg.intrinsic_rewards if self.alg_cfg["rnd_cfg"] else None
-                            # Book keeping
-                            self.logger.process_env_step(rewards, dones, extras, intrinsic_rewards)
+                        # Add to our new data collection
+                        new_states_this_iter.append(current_states_for_dae)
+                        new_actions_this_iter.append(current_actions_for_dae)
+                        new_next_states_this_iter.append(next_states_for_dae)
 
-                        stop = time.time()
-                        collect_time = stop - start
+                        # Fill the PER buffer
+                        self.alg.replay_buffer.insert(
+                            current_states_for_dae,
+                            current_actions_for_dae,
+                            next_states_for_dae,
+                        )
 
-                        if "dae" in self.task or "rff" in self.task:
-                            # Anneal beta for Importance Sampling weights
-                            current_beta = self.alg.replay_buffer.beta_initial + (1.0 - self.alg.replay_buffer.beta_initial) * \
-                                        min(1.0, (it - self.current_learning_iteration) / self.alg.replay_buffer.beta_annealing_steps)
+                    # Extract intrinsic rewards (only for logging)
+                    intrinsic_rewards = self.alg.intrinsic_rewards if self.alg_cfg["rnd_cfg"] else None
+                    # Book keeping
+                    self.logger.process_env_step(rewards, dones, extras, intrinsic_rewards)
 
-                            # Concatenate the new data
-                            batch_states_new = torch.cat(new_states_this_iter, dim=0)
-                            batch_actions_new = torch.cat(new_actions_this_iter, dim=0)
-                            batch_next_states_new = torch.cat(new_next_states_this_iter, dim=0)
+                stop = time.time()
+                collect_time = stop - start
 
-                            # Perform update of normalizers using only the new data
-                            self.alg.obs_action_normalizer.update(batch_states_new, batch_actions_new)
+                if "dae" in self.task or "rff" in self.task:
+                    # Anneal beta for Importance Sampling weights
+                    current_beta = self.alg.replay_buffer.beta_initial + (1.0 - self.alg.replay_buffer.beta_initial) * \
+                                min(1.0, (it - self.current_learning_iteration) / self.alg.replay_buffer.beta_annealing_steps)
 
-                            if "rff" in self.task:
-                                batch_latent_states_new = self.alg.rff(batch_states_new)
-                                self.alg.latent_normalizer.update(batch_latent_states_new)
+                    # Concatenate the new data
+                    batch_states_new = torch.cat(new_states_this_iter, dim=0)
+                    batch_actions_new = torch.cat(new_actions_this_iter, dim=0)
+                    batch_next_states_new = torch.cat(new_next_states_this_iter, dim=0)
 
-                        start = stop
+                    # Perform update of normalizers using only the new data
+                    self.alg.obs_action_normalizer.update(batch_states_new, batch_actions_new)
 
-                        # Compute returns
-                        if "dae" in self.task or "koopman" in self.task:
-                            self.alg.compute_returns(obs, actions)
+                    if "rff" in self.task:
+                        batch_latent_states_new = self.alg.rff(batch_states_new)
+                        self.alg.latent_normalizer.update(batch_latent_states_new)
+
+                start = stop
+
+                # Compute returns
+                if "dae" in self.task or "koopman" in self.task:
+                    self.alg.compute_returns(obs, actions)
+                else:
+                    self.alg.compute_returns(obs)
+
+                if "rff_koopman" in self.task:
+                    koopman_computation_start_time = time.time()
+                    self.alg.koopman_estimator.compute_koopman_op(batch_states_new, batch_actions_new, batch_next_states_new)
+                    pred_error = self.alg.koopman_estimator.compute_pred_error(batch_states_new, batch_actions_new, batch_next_states_new)
+                    koopman_computation_time = time.time() - koopman_computation_start_time
+
+            if "dae" in self.task:
+                # Perform DAE training step
+                if len(self.alg.replay_buffer) >= self.koopman_cfg["mini_batch_size"]:
+                    dae_training_start_time = time.time()
+
+                    dae_num_mini_batches = self.koopman_cfg["num_mini_batches"]
+                    dae_mini_batch_size = self.koopman_cfg["mini_batch_size"]
+
+                    dae_losses_this_iter = []
+                    dae_obs_pred_losses_this_iter = []
+                    dae_state_rec_losses_this_iter = []
+                    dae_state_pred_losses_this_iter = []
+
+                    # Iterating over mini-batches for DAE training
+                    for _ in range(dae_num_mini_batches):
+                        # Sample from the Prioritized Replay Buffer
+                        batch_states_raw, batch_actions_raw, batch_next_states_raw, batch_tree_indices, is_weights = \
+                            self.alg.replay_buffer.sample(dae_mini_batch_size, current_beta)
+
+                        # Transfer is_weights to cuda device
+                        is_weights = is_weights.to(self.device)
+
+                        sample_generator = self.alg.replay_buffer.preprocess_samples(
+                            batch_states_raw, batch_actions_raw, batch_next_states_raw,
+                            frames_per_step=self.koopman_cfg["frames_per_state"],
+                            prediction_horizon=self.koopman_cfg["pred_horizon"]
+                        )
+
+                        all_state_observations = []
+                        all_action_observations = []
+                        all_next_state_observations = []
+                        for sample in sample_generator:
+                            all_state_observations.append(sample["state_observations"].unsqueeze(0))
+                            all_action_observations.append(sample["action_observations"].unsqueeze(0))
+                            all_next_state_observations.append(sample["next_state_observations"].unsqueeze(0))
+
+                        # If preprocess_samples yielded no valid samples (e.g., traj too short), skip this mini-batch
+                        if not all_state_observations:
+                            print("Warning: No valid samples generated by preprocess_samples, skipping DAE mini-batch.")
+                            continue
+
+                        combined_state_observations = torch.cat(all_state_observations, dim=0).to(self.device)
+                        combined_action_observations = torch.cat(all_action_observations, dim=0).to(self.device)
+                        combined_next_state_observations = torch.cat(all_next_state_observations, dim=0).to(self.device)
+
+                        # Use the combined_state_observations and combined_action_observations
+                        # (which are the raw, un-normalized inputs) to update the statistics.
+                        self.alg.obs_action_normalizer.update(
+                            batch_states_raw,
+                            batch_actions_raw,
+                        )
+
+                        # Move preprocessed and normalized batch to the correct device for the DAE model
+                        batch = self.alg.replay_buffer.shape_states_actions(
+                                combined_state_observations, combined_action_observations, combined_next_state_observations #TODO no norming
+                        )
+
+                        batch_on_device = {k: v.to(self.device) for k, v in batch.items()}
+
+                        # Forward pass through DAE
+                        if hasattr(self.alg.dae_model, 'action_dim') and self.alg.dae_model.action_dim > 0:
+                            outputs = self.alg.dae_model(**batch_on_device)
                         else:
-                            self.alg.compute_returns(obs)
+                            outputs = self.alg.dae_model(**batch_on_device)
 
-                        if "rff_koopman" in self.task:
-                            koopman_computation_start_time = time.time()
-                            self.alg.koopman_estimator.compute_koopman_op(batch_states_new, batch_actions_new, batch_next_states_new)
-                            pred_error = self.alg.koopman_estimator.compute_pred_error(batch_states_new, batch_actions_new, batch_next_states_new)
-                            koopman_computation_time = time.time() - koopman_computation_start_time
+                        # Compute DAE losses
+                        dae_loss_per_sample, dae_metrics = self.alg.dae_model.compute_loss_and_metrics(**outputs, **batch_on_device)
 
-                    if "dae" in self.task:
-                        # Perform DAE training step
-                        if len(self.alg.replay_buffer) >= self.koopman_cfg["mini_batch_size"]:
-                            dae_training_start_time = time.time()
+                        # Apply importance sampling weights to the loss
+                        actual_batch_size_for_loss = dae_loss_per_sample.shape[0]
+                        if is_weights.shape[0] != actual_batch_size_for_loss:
+                            is_weights_aligned = is_weights[:actual_batch_size_for_loss]
+                        else:
+                            is_weights_aligned = is_weights
 
-                            dae_num_mini_batches = self.koopman_cfg["num_mini_batches"]
-                            dae_mini_batch_size = self.koopman_cfg["mini_batch_size"]
+                        weighted_dae_loss = (dae_loss_per_sample * is_weights_aligned).mean()
 
-                            dae_losses_this_iter = []
-                            dae_obs_pred_losses_this_iter = []
-                            dae_state_rec_losses_this_iter = []
-                            dae_state_pred_losses_this_iter = []
+                        # Backpropagate and update DAE weights
+                        self.alg.dae_optimizer.zero_grad()
+                        weighted_dae_loss.backward()
+                        self.alg.dae_optimizer.step()
 
-                            # Iterating over mini-batches for DAE training
-                            for _ in range(dae_num_mini_batches):
-                                # Sample from the Prioritized Replay Buffer
-                                batch_states_raw, batch_actions_raw, batch_next_states_raw, batch_tree_indices, is_weights = \
-                                    self.alg.replay_buffer.sample(dae_mini_batch_size, current_beta)
+                        # Update priorities in the replay buffer
+                        # Use the per-sample losses as errors
+                        dae_errors_for_priority_update = dae_loss_per_sample.detach().cpu().numpy()
 
-                                # Transfer is_weights to cuda device
-                                is_weights = is_weights.to(self.device)
+                        # Ensure that the batch_tree_indices also aligns with the number of samples that actually generated a loss.
+                        if len(batch_tree_indices) != actual_batch_size_for_loss:
+                            batch_tree_indices_aligned = batch_tree_indices[:actual_batch_size_for_loss]
+                        else:
+                            batch_tree_indices_aligned = batch_tree_indices
 
-                                sample_generator = self.alg.replay_buffer.preprocess_samples(
-                                    batch_states_raw, batch_actions_raw, batch_next_states_raw,
-                                    frames_per_step=self.koopman_cfg["frames_per_state"],
-                                    prediction_horizon=self.koopman_cfg["pred_horizon"]
-                                )
+                        # Prioritize samples based on the overall DAE loss
+                        self.alg.replay_buffer.update_priorities(
+                            batch_tree_indices_aligned,
+                            dae_errors_for_priority_update
+                        )
 
-                                all_state_observations = []
-                                all_action_observations = []
-                                all_next_state_observations = []
-                                for sample in sample_generator:
-                                    all_state_observations.append(sample["state_observations"].unsqueeze(0))
-                                    all_action_observations.append(sample["action_observations"].unsqueeze(0))
-                                    all_next_state_observations.append(sample["next_state_observations"].unsqueeze(0))
+                        dae_losses_this_iter.append(weighted_dae_loss.item())
+                        dae_obs_pred_losses_this_iter.append(dae_metrics["obs_pred_loss"].item())
+                        dae_state_rec_losses_this_iter.append(dae_metrics["state_rec_loss"].item())
+                        dae_state_pred_losses_this_iter.append(dae_metrics["state_pred_loss"].item())
 
-                                # If preprocess_samples yielded no valid samples (e.g., traj too short), skip this mini-batch
-                                if not all_state_observations:
-                                    print("Warning: No valid samples generated by preprocess_samples, skipping DAE mini-batch.")
-                                    continue
+                    if dae_losses_this_iter:
+                        mean_dae_loss = sum(dae_losses_this_iter) / len(dae_losses_this_iter)
+                        mean_dae_obs_pred_loss = sum(dae_obs_pred_losses_this_iter) / len(dae_obs_pred_losses_this_iter)
+                        mean_dae_state_rec_loss = sum(dae_state_rec_losses_this_iter) / len(dae_state_rec_losses_this_iter)
+                        mean_dae_state_pred_loss = sum(dae_state_pred_losses_this_iter) / len(dae_state_pred_losses_this_iter)
+                    else:
+                        mean_dae_loss = 0.0 # No batches trained
+                        mean_dae_obs_pred_loss = 0.0
+                        mean_dae_state_rec_loss = 0.0
+                        mean_dae_state_pred_loss = 0.0
 
-                                combined_state_observations = torch.cat(all_state_observations, dim=0).to(self.device)
-                                combined_action_observations = torch.cat(all_action_observations, dim=0).to(self.device)
-                                combined_next_state_observations = torch.cat(all_next_state_observations, dim=0).to(self.device)
-
-                                # Use the combined_state_observations and combined_action_observations
-                                # (which are the raw, un-normalized inputs) to update the statistics.
-                                self.alg.obs_action_normalizer.update(
-                                    batch_states_raw,
-                                    batch_actions_raw,
-                                )
-
-                                # Move preprocessed and normalized batch to the correct device for the DAE model
-                                batch = self.alg.replay_buffer.shape_states_actions(
-                                        combined_state_observations, combined_action_observations, combined_next_state_observations #TODO no norming
-                                )
-
-                                batch_on_device = {k: v.to(self.device) for k, v in batch.items()}
-
-                                # Forward pass through DAE
-                                if hasattr(self.alg.dae_model, 'action_dim') and self.alg.dae_model.action_dim > 0:
-                                    outputs = self.alg.dae_model(**batch_on_device)
-                                else:
-                                    outputs = self.alg.dae_model(**batch_on_device)
-
-                                # Compute DAE losses
-                                dae_loss_per_sample, dae_metrics = self.alg.dae_model.compute_loss_and_metrics(**outputs, **batch_on_device)
-
-                                # Apply importance sampling weights to the loss
-                                actual_batch_size_for_loss = dae_loss_per_sample.shape[0]
-                                if is_weights.shape[0] != actual_batch_size_for_loss:
-                                    is_weights_aligned = is_weights[:actual_batch_size_for_loss]
-                                else:
-                                    is_weights_aligned = is_weights
-
-                                weighted_dae_loss = (dae_loss_per_sample * is_weights_aligned).mean()
-
-                                # Backpropagate and update DAE weights
-                                self.alg.dae_optimizer.zero_grad()
-                                weighted_dae_loss.backward()
-                                self.alg.dae_optimizer.step()
-
-                                # Update priorities in the replay buffer
-                                # Use the per-sample losses as errors
-                                dae_errors_for_priority_update = dae_loss_per_sample.detach().cpu().numpy()
-
-                                # Ensure that the batch_tree_indices also aligns with the number of samples that actually generated a loss.
-                                if len(batch_tree_indices) != actual_batch_size_for_loss:
-                                    batch_tree_indices_aligned = batch_tree_indices[:actual_batch_size_for_loss]
-                                else:
-                                    batch_tree_indices_aligned = batch_tree_indices
-
-                                # Prioritize samples based on the overall DAE loss
-                                self.alg.replay_buffer.update_priorities(
-                                    batch_tree_indices_aligned,
-                                    dae_errors_for_priority_update
-                                )
-
-                                dae_losses_this_iter.append(weighted_dae_loss.item())
-                                dae_obs_pred_losses_this_iter.append(dae_metrics["obs_pred_loss"].item())
-                                dae_state_rec_losses_this_iter.append(dae_metrics["state_rec_loss"].item())
-                                dae_state_pred_losses_this_iter.append(dae_metrics["state_pred_loss"].item())
-
-                            if dae_losses_this_iter:
-                                mean_dae_loss = sum(dae_losses_this_iter) / len(dae_losses_this_iter)
-                                mean_dae_obs_pred_loss = sum(dae_obs_pred_losses_this_iter) / len(dae_obs_pred_losses_this_iter)
-                                mean_dae_state_rec_loss = sum(dae_state_rec_losses_this_iter) / len(dae_state_rec_losses_this_iter)
-                                mean_dae_state_pred_loss = sum(dae_state_pred_losses_this_iter) / len(dae_state_pred_losses_this_iter)
-                            else:
-                                mean_dae_loss = 0.0 # No batches trained
-                                mean_dae_obs_pred_loss = 0.0
-                                mean_dae_state_rec_loss = 0.0
-                                mean_dae_state_pred_loss = 0.0
-
-                            dae_train_time = time.time() - dae_training_start_time
+                    dae_train_time = time.time() - dae_training_start_time
 
 
-                    # Update policy
-                    loss_dict = self.alg.update()
+            # Update policy
+            loss_dict = self.alg.update()
 
-                    stop = time.time()
-                    learn_time = stop - start
+            stop = time.time()
+            learn_time = stop - start
 
-                    if "dae" in self.task:
-                        loss_dict["dae_loss"] = mean_dae_loss
-                        loss_dict["dae_obs_pred_loss"] = mean_dae_obs_pred_loss
-                        loss_dict["dae_state_rec_loss"] = mean_dae_state_rec_loss
-                        loss_dict["dae_state_pred_loss"] = mean_dae_state_pred_loss
-                        loss_dict["dae_train_time"] = dae_train_time
+            if "dae" in self.task:
+                loss_dict["dae_loss"] = mean_dae_loss
+                loss_dict["dae_obs_pred_loss"] = mean_dae_obs_pred_loss
+                loss_dict["dae_state_rec_loss"] = mean_dae_state_rec_loss
+                loss_dict["dae_state_pred_loss"] = mean_dae_state_pred_loss
+                loss_dict["dae_train_time"] = dae_train_time
 
-                    if "rff_koopman" in self.task:
-                        a_matrix = self.alg.koopman_estimator.K_matrix[:, :self.alg.koopman_estimator.feature_dim].detach()
-                        eigvals = torch.linalg.eigvals(a_matrix)
+            if "rff_koopman" in self.task:
+                a_matrix = self.alg.koopman_estimator.K_matrix[:, :self.alg.koopman_estimator.feature_dim].detach()
+                eigvals = torch.linalg.eigvals(a_matrix)
 
-                        loss_dict["koopman_computation_time"] = koopman_computation_time
-                        loss_dict["koopman_pred_error"] = pred_error
-                        loss_dict["max_eigval"] = torch.max(torch.abs(eigvals)).item()
-                        loss_dict["min_eigval"] = torch.min(torch.abs(eigvals)).item()
+                loss_dict["koopman_computation_time"] = koopman_computation_time
+                loss_dict["koopman_pred_error"] = pred_error
+                loss_dict["max_eigval"] = torch.max(torch.abs(eigvals)).item()
+                loss_dict["min_eigval"] = torch.min(torch.abs(eigvals)).item()
 
-                    self.current_learning_iteration = it
+            self.current_learning_iteration = it
 
-                    # Log information
-                    self.logger.log(
-                        it=it,
-                        start_it=start_it,
-                        total_it=total_it,
-                        collect_time=collect_time,
-                        learn_time=learn_time,
-                        loss_dict=loss_dict,
-                        learning_rate=self.alg.learning_rate,
-                        action_std=self.alg.policy.action_std,
-                        rnd_weight=self.alg.rnd.weight if self.alg_cfg["rnd_cfg"] else None,
-                    )
+            # Log information
+            self.logger.log(
+                it=it,
+                start_it=start_it,
+                total_it=total_it,
+                collect_time=collect_time,
+                learn_time=learn_time,
+                loss_dict=loss_dict,
+                learning_rate=self.alg.learning_rate,
+                action_std=self.alg.policy.action_std,
+                rnd_weight=self.alg.rnd.weight if self.alg_cfg["rnd_cfg"] else None,
+            )
 
-                    # Save model
-                    if it % self.cfg["save_interval"] == 0:
-                        self.save(os.path.join(self.logger.log_dir, f"model_{it}.pt"))  # type: ignore
+            # Save model
+            if it % self.cfg["save_interval"] == 0:
+                self.save(os.path.join(self.logger.log_dir, f"model_{it}.pt"))  # type: ignore
 
-                # Save the final model after training
-                if self.logger.log_dir is not None and not self.logger.disable_logs:
-                    self.save(os.path.join(self.logger.log_dir, f"model_{self.current_learning_iteration}.pt"))
+        # Save the final model after training
+        if self.logger.log_dir is not None and not self.logger.disable_logs:
+            self.save(os.path.join(self.logger.log_dir, f"model_{self.current_learning_iteration}.pt"))
 
     def save(self, path: str, infos: dict | None = None) -> None:
         # Save main policy and optimizer
@@ -348,6 +362,19 @@ class SymmDAEOnPolicyRunner:
             saved_dict["dae_state_dict"] = self.alg.dae_model.state_dict()
             saved_dict["dae_optimizer_state_dict"] = self.alg.dae_optimizer.state_dict()
             saved_dict["normalizer_state_dict"] = self.alg.obs_action_normalizer.state_dict()
+
+        if "rff" in self.task:
+                    saved_dict["normalizer_state_dict"] = self.alg.obs_action_normalizer.state_dict()
+                    saved_dict["latent_normalizer_state_dict"] = self.alg.latent_normalizer.state_dict()
+
+                    if "koopman" in self.task:
+                        saved_dict["koopman_state_dict"] = self.alg.koopman_estimator.state_dict()
+                        saved_dict["koopman_config"] = {
+                            'koopman_input_dim': self.alg.koopman_estimator.koopman_input_dim,
+                            'koopman_output_dim': self.alg.koopman_estimator.koopman_output_dim,
+                            'gamma': self.alg.koopman_estimator.gamma,
+                            'K': self.alg.koopman_estimator.K_matrix,
+                        }
 
         torch.save(saved_dict, path)
 

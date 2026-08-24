@@ -192,6 +192,20 @@ class DAEOnPolicyRunner:
                     self.alg.latent_normalizer.update(batch_latent_states)
 
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False) -> None:
+
+        # Save the RFF since they are static and already initialized
+        if "rff" in self.task and self.logger.log_dir is not None:
+            rff_path = os.path.join(self.logger.log_dir, 'rff.pt')
+            torch.save({
+                'rff_state_dict': self.alg.rff.state_dict(),
+                'rff_config': {
+                    'in_features': self.alg.rff.in_features,
+                    'sigma': self.alg.rff.sigma,
+                    'kernel_type': self.alg.rff.kernel_type,
+                    'm': self.alg.rff.m,
+                }
+            }, rff_path)
+
         # Randomize initial episode lengths (for exploration)
         if init_at_random_ep_len:
             self.env.episode_length_buf = torch.randint_like(
@@ -479,6 +493,19 @@ class DAEOnPolicyRunner:
             saved_dict["dae_state_dict"] = self.alg.dae_model.state_dict()
             saved_dict["dae_optimizer_state_dict"] = self.alg.dae_optimizer.state_dict()
             saved_dict["normalizer_state_dict"] = self.alg.obs_action_normalizer.state_dict()
+
+        if "rff" in self.task:
+            saved_dict["normalizer_state_dict"] = self.alg.obs_action_normalizer.state_dict()
+            saved_dict["latent_normalizer_state_dict"] = self.alg.latent_normalizer.state_dict()
+
+            if "koopman" in self.task:
+                saved_dict["koopman_state_dict"] = self.alg.koopman_estimator.state_dict()
+                saved_dict["koopman_config"] = {
+                    'koopman_input_dim': self.alg.koopman_estimator.koopman_input_dim,
+                    'koopman_output_dim': self.alg.koopman_estimator.koopman_output_dim,
+                    'gamma': self.alg.koopman_estimator.gamma,
+                    'K': self.alg.koopman_estimator.K_matrix,
+                }
 
         torch.save(saved_dict, path)
 
