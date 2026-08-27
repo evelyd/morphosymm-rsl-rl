@@ -541,6 +541,33 @@ class DAEOnPolicyRunner:
                 if "normalizer_state_dict" in loaded_dict:
                     self.alg.obs_action_normalizer.load_state_dict(loaded_dict["normalizer_state_dict"])
 
+            if "rff" in self.task:
+                # 1. Load the normalizers from the main checkpoint
+                if "normalizer_state_dict" in loaded_dict:
+                    self.alg.obs_action_normalizer.load_state_dict(loaded_dict["normalizer_state_dict"])
+                if "latent_normalizer_state_dict" in loaded_dict:
+                    self.alg.latent_normalizer.load_state_dict(loaded_dict["latent_normalizer_state_dict"])
+
+                # 2. Load the Koopman Estimator
+                if "koopman" in self.task:
+                    if "koopman_state_dict" in loaded_dict:
+                        self.alg.koopman_estimator.load_state_dict(loaded_dict["koopman_state_dict"])
+                    # K_matrix is not a registered buffer, so we must manually restore it from the config!
+                    if "koopman_config" in loaded_dict:
+                        self.alg.koopman_estimator.K_matrix = loaded_dict["koopman_config"]["K"].to(self.device)
+
+                # 3. Dynamically find and load the separate rff.pt file
+                import os
+                checkpoint_dir = os.path.dirname(path)
+                rff_path = os.path.join(checkpoint_dir, 'rff.pt')
+
+                if os.path.exists(rff_path):
+                    rff_dict = torch.load(rff_path, weights_only=False, map_location=map_location)
+                    self.alg.rff.load_state_dict(rff_dict["rff_state_dict"])
+                    print(f"Successfully loaded RFF weights from: {rff_path}")
+                else:
+                    print(f"Warning: Could not find rff.pt at {rff_path}. Features will be randomly initialized!")
+
             # Load current learning iteration
             if resumed_training:
                 self.current_learning_iteration = loaded_dict["iter"]
