@@ -220,6 +220,62 @@ class PPORFF:
             sigma_batch = self.policy.action_std[:original_batch_size]
             entropy_batch = self.policy.entropy[:original_batch_size]
 
+            # Compute KL divergence and adapt the learning rate
+            if self.desired_kl is not None and self.schedule == "adaptive":
+                with torch.inference_mode():
+                    if getattr(self.policy, "use_log_prob_kl", False):
+                        old_actions_log_prob = old_actions_log_prob_batch.squeeze(-1)
+                        if old_actions_log_prob.shape != actions_log_prob_batch.shape:
+                            old_actions_log_prob = old_actions_log_prob.reshape_as(actions_log_prob_batch)
+                        kl = old_actions_log_prob - actions_log_prob_batch.detach()
+                    elif getattr(self.policy, "use_masked_action_kl", False):
+                        active_dims = (old_sigma_batch > 0.0) & (sigma_batch > 0.0)
+                        old_sigma = old_sigma_batch.clamp_min(1.0e-6)
+                        sigma = sigma_batch.clamp_min(1.0e-6)
+                        kl = torch.sum(
+                            (
+                                torch.log(sigma / old_sigma)
+                                + (torch.square(old_sigma) + torch.square(old_mu_batch - mu_batch))
+                                / (2.0 * torch.square(sigma))
+                                - 0.5
+                            )
+                            * active_dims,
+                            axis=-1,
+                        )
+                    else:
+                        kl = torch.sum(
+                            torch.log(sigma_batch / old_sigma_batch + 1.0e-5)
+                            + (torch.square(old_sigma_batch) + torch.square(old_mu_batch - mu_batch))
+                            / (2.0 * torch.square(sigma_batch))
+                            - 0.5,
+                            axis=-1,
+                        )
+                    kl_mean = torch.mean(kl)
+
+                    # Reduce the KL divergence across all GPUs
+                    if self.is_multi_gpu:
+                        torch.distributed.all_reduce(kl_mean, op=torch.distributed.ReduceOp.SUM)
+                        kl_mean /= self.gpu_world_size
+
+                    # Update the learning rate only on the main process
+                    # TODO: Is this needed? If KL-divergence is the "same" across all GPUs,
+                    #       then the learning rate should be the same across all GPUs.
+                    if self.gpu_global_rank == 0:
+                        if kl_mean > self.desired_kl * 2.0:
+                            self.learning_rate = max(1e-5, self.learning_rate / 1.5)
+                        elif kl_mean < self.desired_kl / 2.0 and kl_mean > 0.0:
+                            self.learning_rate = min(1e-2, self.learning_rate * 1.5)
+
+                    # Update the learning rate for all GPUs
+                    if self.is_multi_gpu:
+                        lr_tensor = torch.tensor(self.learning_rate, device=self.device)
+                        torch.distributed.broadcast(lr_tensor, src=0)
+                        self.learning_rate = lr_tensor.item()
+
+                    # Update the learning rate for all parameter groups
+                    for param_group in self.optimizer.param_groups:
+                        param_group["lr"] = self.learning_rate
+
             # Standard PPO Clipping and Loss computations
             ratio = torch.exp(actions_log_prob_batch - torch.squeeze(old_actions_log_prob_batch))
             surrogate = -torch.squeeze(advantages_batch) * ratio
