@@ -5,12 +5,13 @@
 
 """Definitions for neural-network components for RL-agents."""
 
-from .dae_actor_critic import DAEActorCritic
-from .ac_symm import ActorCriticSymm
+from .dae_actor_critic import DAEModel
+from .ac_symm import EquivGaussianDistribution, SymmModel
 from .normalizer import EquivEmpiricalNormalization
 
 __all__ = [
-    "DAEActorCritic",
-    "ActorCriticSymm",
+    "DAEModel",
     "EquivEmpiricalNormalization",
+    "EquivGaussianDistribution",
+    "SymmModel",
 ]

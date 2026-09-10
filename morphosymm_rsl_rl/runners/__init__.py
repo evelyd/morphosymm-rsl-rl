@@ -8,6 +8,10 @@
 from .on_policy_runner import OnPolicyRunner
 from .symm_on_policy_runner import SymmOnPolicyRunner
 from .dae_on_policy_runner import DAEOnPolicyRunner
-from .symm_dae_on_policy_runner import SymmDAEOnPolicyRunner
+
+try:
+	from .symm_dae_on_policy_runner import SymmDAEOnPolicyRunner
+except ImportError:
+	SymmDAEOnPolicyRunner = None
 
 __all__ = ["OnPolicyRunner", "SymmOnPolicyRunner", "DAEOnPolicyRunner", "SymmDAEOnPolicyRunner"]

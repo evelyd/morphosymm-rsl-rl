@@ -8,8 +8,20 @@
 from .ppo_symm_data_augment import PPOSymmDataAugmented
 from .ppo import PPO
 from .ppo_dae_online import PPODAEOnline
-from .ppo_symm_dae_online import PPOSymmDAEOnline
-from .ppo_rff import PPORFF
-from .ppo_symm_erff import PPOSymmERFF
+
+try:
+	from .ppo_symm_dae_online import PPOSymmDAEOnline
+except ImportError:
+	PPOSymmDAEOnline = None
+
+try:
+	from .ppo_rff import PPORFF
+except ImportError:
+	PPORFF = None
+
+try:
+	from .ppo_symm_erff import PPOSymmERFF
+except ImportError:
+	PPOSymmERFF = None
 
 __all__ = ["PPOSymmDataAugmented", "PPO", "PPODAEOnline", "PPOSymmDAEOnline", "PPORFF", "PPOSymmERFF"]
