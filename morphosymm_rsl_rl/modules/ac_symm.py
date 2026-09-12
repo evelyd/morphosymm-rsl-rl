@@ -446,6 +446,7 @@ class SymmModel(MLPModel):
         *,
         obs_space_names_actor: list[str] | tuple[str, ...] | None = None,
         obs_space_names_critic: list[str] | tuple[str, ...] | None = None,
+        obs_space_names_single_state: list[str] | None = None,
         action_space_names: list[str] | tuple[str, ...] | None = None,
         joints_order: list[str] | None = None,
         robot_name: str | None = None,
@@ -487,6 +488,7 @@ class SymmModel(MLPModel):
         self.num_replica = len(self.G.elements)
         self.actor_in_type = FieldType(gspace, [representations[name] for name in obs_space_names_actor])
         self.critic_in_type = FieldType(gspace, [representations[name] for name in obs_space_names_critic])
+        self.state_type = FieldType(gspace, [representations[name] for name in obs_space_names_single_state])
         self.actor_out_type = FieldType(gspace, [representations[name] for name in action_space_names])
 
         own_in_type = self.actor_in_type if obs_set == "actor" else self.critic_in_type
