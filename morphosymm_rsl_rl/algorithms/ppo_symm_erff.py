@@ -491,6 +491,8 @@ class PPOSymmERFF:
         st = self.storage
         if last_action is not None:
             obs.set("koopman_prediction", self.rff_predict(obs, last_action))
+        else:
+            obs.set("koopman_prediction", self.rff_predict(obs, None))
 
         last_values = self.critic(self._augment_observations(obs)).detach()
 

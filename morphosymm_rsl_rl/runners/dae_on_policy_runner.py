@@ -122,7 +122,6 @@ class DAEOnPolicyRunner:
 
         # Create the algorithm natively in v5 style using the factory method
         algorithm_class_name = self.cfg["algorithm"]["class_name"]
-        input(f"Constructing algorithm '{algorithm_class_name}' with config: {self.cfg['algorithm']}")
         if algorithm_class_name == "PPODAEOnline":
             from morphosymm_rsl_rl.algorithms import PPODAEOnline
             alg_class: type[PPO] = PPODAEOnline
