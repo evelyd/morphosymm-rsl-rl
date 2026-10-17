@@ -64,7 +64,8 @@ def fill_replay_buffer(algorithm_instance, env_instance, state_dim, num_initial_
                 actions = algorithm_instance.act(obs)
 
                 critic_obs = obs["critic"]
-                current_states_for_dae = critic_obs[:, state_dim*(algorithm_instance.history_length-1):state_dim*algorithm_instance.history_length].clone()
+                single_obs_space = env_instance.cfg.single_observation_space
+                current_states_for_dae = critic_obs[:, single_obs_space*(algorithm_instance.history_length-1):single_obs_space*algorithm_instance.history_length][:, :-12].clone()
                 current_actions_for_dae = actions.clone()
 
                 obs, rewards, dones, extras = env_instance.step(actions.to(env_instance.device))
@@ -77,7 +78,7 @@ def fill_replay_buffer(algorithm_instance, env_instance, state_dim, num_initial_
                 critic_obs_next = obs["critic"]
                 new_states.append(current_states_for_dae)
                 new_actions.append(current_actions_for_dae)
-                new_next_states.append(critic_obs_next[:, state_dim*(algorithm_instance.history_length-1):state_dim*algorithm_instance.history_length].clone())
+                new_next_states.append(critic_obs_next[:, single_obs_space*(algorithm_instance.history_length-1):single_obs_space*algorithm_instance.history_length][:, :-12].clone())
 
                 if hasattr(algorithm_instance, 'replay_buffer'):
                     algorithm_instance.replay_buffer.insert(
@@ -180,7 +181,11 @@ class SymmDAEOnPolicyRunner(OnPolicyRunner):
 
                     if "dae" in self.task or "rff" in self.task:
                         current_critic_obs_for_dae = obs["critic"]
-                        current_states_for_dae = current_critic_obs_for_dae[:, self.single_observation_space*(self.history_length-1):self.single_observation_space*self.history_length].clone()
+                        # Extract single state and strip the last 12 features
+                        current_states_for_dae = current_critic_obs_for_dae[
+                            :, 
+                            self.single_observation_space*(self.history_length-1) : self.single_observation_space*self.history_length
+                        ][:, :-12].clone()
                         current_actions_for_dae = actions.clone()
 
                     obs, rewards, dones, extras = self.env.step(actions.to(self.env.device))
@@ -193,7 +198,12 @@ class SymmDAEOnPolicyRunner(OnPolicyRunner):
 
                     if "dae" in self.task or "rff" in self.task:
                         next_critic_obs_for_dae = obs["critic"]
-                        next_states_for_dae = next_critic_obs_for_dae[:, self.single_observation_space*(self.history_length-1):self.single_observation_space*self.history_length].clone()
+                        # Do the same for the next states
+                        next_critic_obs_for_dae = obs["critic"]
+                        next_states_for_dae = next_critic_obs_for_dae[
+                            :, 
+                            self.single_observation_space*(self.history_length-1) : self.single_observation_space*self.history_length
+                        ][:, :-12].clone()
                         new_states_this_iter.append(current_states_for_dae)
                         new_actions_this_iter.append(current_actions_for_dae)
                         new_next_states_this_iter.append(next_states_for_dae)

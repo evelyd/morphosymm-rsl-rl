@@ -47,7 +47,7 @@ class PPORFF(PPO):
         self.dt = dt
         self.single_observation_space = single_observation_space
         self.history_length = history_length
-        self.state_dim = single_observation_space
+        self.state_dim = single_observation_space - 12 # remove joint status
         self.action_dim = action_space
         self.koopman_cfg = koopman_cfg or {}
 
@@ -192,6 +192,9 @@ class PPORFF(PPO):
             :,
             self.single_observation_space * (self.history_length - 1) : self.single_observation_space * self.history_length,
         ]
+
+        # Strip the 12-dimensional joints_status mask
+        dae_input = dae_input[:, :-12]
 
         latent_raw = self.rff(dae_input)
 

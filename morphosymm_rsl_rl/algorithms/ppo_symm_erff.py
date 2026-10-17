@@ -121,7 +121,7 @@ class PPOSymmERFF(SymmPPO):
         self.dt = dt
         self.single_observation_space = single_observation_space
         self.history_length = history_length
-        self.state_dim = single_observation_space
+        self.state_dim = single_observation_space - 12 # remove joint status
         self.action_dim = action_space
         self.koopman_cfg = koopman_cfg or {}
 
@@ -169,7 +169,7 @@ class PPOSymmERFF(SymmPPO):
 
         self.rff = EquivariantRandomFourierFeatures(
             task=task,
-            in_features=single_observation_space,
+            in_features=self.state_dim,
             in_type=self.state_type,
             m=num_reps,
             sigma=self.koopman_cfg.get('sigma', 1.0),
@@ -352,6 +352,9 @@ class PPOSymmERFF(SymmPPO):
             :,
             self.single_observation_space * (self.history_length - 1) : self.single_observation_space * self.history_length,
         ]
+
+        # Strip the 12-dimensional joints_status mask
+        dae_input = dae_input[:, :-12]
 
         dae_input = escnn.nn.GeometricTensor(dae_input, self.state_type)
         latent_raw = self.rff(dae_input)
