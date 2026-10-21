@@ -5,12 +5,8 @@
 
 from __future__ import annotations
 
-from itertools import chain
-
-import escnn
 import torch
 from escnn.group import Group
-from escnn.nn import FieldType
 from tensordict import TensorDict
 
 from rsl_rl.env import VecEnv
@@ -26,79 +22,15 @@ from morphosymm_rsl_rl.symm_utils import configure_observation_space_representat
 from dha.utils.utils import initialize_dae_model
 
 
-class _AugmentedRolloutStorage(RolloutStorage):
-    """Rollout storage over symmetry-augmented transitions."""
-
-    def __init__(self, *args, num_original_envs: int, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self.num_original_envs = num_original_envs
-        self.last_batch_is_identity: torch.Tensor | None = None
-
-    def mini_batch_generator(self, num_mini_batches: int, num_epochs: int = 8):
-        if self.training_type != "rl":
-            raise ValueError("This function is only available for reinforcement learning training.")
-        batch_size = self.num_envs * self.num_transitions_per_env
-        mini_batch_size = batch_size // num_mini_batches
-        indices = torch.randperm(num_mini_batches * mini_batch_size, requires_grad=False, device=self.device)
-
-        is_identity_per_step = torch.arange(self.num_envs, device=self.device) < self.num_original_envs
-        is_identity_flat = is_identity_per_step.repeat(self.num_transitions_per_env)
-
-        observations = self.observations.flatten(0, 1)
-        actions = self.actions.flatten(0, 1)
-        values = self.values.flatten(0, 1)
-        returns = self.returns.flatten(0, 1)
-        old_actions_log_prob = self.actions_log_prob.flatten(0, 1)
-        advantages = self.advantages.flatten(0, 1)
-        old_distribution_params = tuple(p.flatten(0, 1) for p in self.distribution_params)
-
-        for _ in range(num_epochs):
-            for i in range(num_mini_batches):
-                start = i * mini_batch_size
-                stop = (i + 1) * mini_batch_size
-                batch_idx = indices[start:stop]
-                self.last_batch_is_identity = is_identity_flat[batch_idx]
-
-                yield RolloutStorage.Batch(
-                    observations=observations[batch_idx],
-                    actions=actions[batch_idx],
-                    values=values[batch_idx],
-                    advantages=advantages[batch_idx],
-                    returns=returns[batch_idx],
-                    old_actions_log_prob=old_actions_log_prob[batch_idx],
-                    old_distribution_params=tuple(p[batch_idx] for p in old_distribution_params),
-                )
-
-
-def _identity_only_kl_divergence(actor: object, storage: _AugmentedRolloutStorage) -> None:
-    original_get_kl_divergence = getattr(actor, "get_kl_divergence", None)
-    if original_get_kl_divergence is None:
-        return
-
-    def get_kl_divergence(old_distribution_params, new_distribution_params):
-        kl = original_get_kl_divergence(old_distribution_params, new_distribution_params)
-        mask = storage.last_batch_is_identity
-        if mask is None or not torch.any(mask):
-            return kl
-        return kl.new_full(kl.shape, kl[mask].mean())
-
-    actor.get_kl_divergence = get_kl_divergence
-
-
 class PPOSymmDAEOnline(SymmPPO):
     """Equivariant PPO with Online ECDAE integration, inheriting from SymmPPO."""
 
     G: Group
-    num_replica: int
-    actor_in_type: FieldType
-    critic_in_type: FieldType
-    actor_out_type: FieldType
-
     def __init__(
         self,
         actor: SymmModel,
         critic: SymmModel,
-        storage: _AugmentedRolloutStorage,
+        storage: RolloutStorage,
         task: str = "ecdae",
         dt: float = 1.0,
         single_observation_space: int = 1,
@@ -135,12 +67,6 @@ class PPOSymmDAEOnline(SymmPPO):
 
         # Pull representations natively from the actor
         self.G = self.actor.G
-        self.num_replica = len(self.G.elements)
-        self.actor_in_type = getattr(self.actor, "in_type", getattr(self.actor, "actor_in_type", None))
-        self.critic_in_type = getattr(self.critic, "in_type", getattr(self.critic, "critic_in_type", None))
-        self.actor_out_type = getattr(self.actor, "out_type", getattr(self.actor, "actor_out_type", None))
-        self._raw_actor = self.actor
-        self._raw_critic = self.critic
 
         self.dae_model = initialize_dae_model(
             morphologycal_symmetries_cfg=self.morphologycal_symmetries_cfg,
@@ -195,8 +121,6 @@ class PPOSymmDAEOnline(SymmPPO):
         G, _ = configure_observation_space_representations(
             symm_cfg["robot_name"], all_space_names, symm_cfg["joints_order"]
         )
-        num_replica = len(G.elements)
-
         actor_class_name = cfg.get("actor", {}).pop("class_name", "SymmModel")
         critic_class_name = cfg.get("critic", {}).pop("class_name", "SymmModel")
 
@@ -227,20 +151,7 @@ class PPOSymmDAEOnline(SymmPPO):
         actor = actor_class(obs, cfg["obs_groups"], "actor", env.num_actions, **actor_cfg, **symm_cfg).to(device)
         critic = critic_class(obs, cfg["obs_groups"], "critic", 1, **critic_cfg, **symm_cfg).to(device)
 
-        tiled_obs = TensorDict(
-            {key: PPOSymmDAEOnline._tile(value, num_replica) for key, value in obs.items()},
-            batch_size=[obs.batch_size[0] * num_replica],
-            device=obs.device,
-        )
-        storage = _AugmentedRolloutStorage(
-            "rl",
-            env.num_envs * num_replica,
-            cfg["num_steps_per_env"],
-            tiled_obs,
-            [env.num_actions],
-            device,
-            num_original_envs=env.num_envs,
-        )
+        storage = RolloutStorage("rl", env.num_envs, cfg["num_steps_per_env"], obs, [env.num_actions], device)
 
         alg_cfg.pop("class_name", None)
         alg_cfg.pop("share_cnn_encoders", None)
@@ -261,7 +172,6 @@ class PPOSymmDAEOnline(SymmPPO):
             **alg_cfg,
         )
 
-        _identity_only_kl_divergence(alg.actor, alg.storage)
         return alg
 
     def train_mode(self) -> None:
@@ -343,74 +253,17 @@ class PPOSymmDAEOnline(SymmPPO):
                 self.transition.values * extras["time_outs"].unsqueeze(1).to(self.device), 1
             )
 
-        self._augment_transition()
         self.storage.add_transition(self.transition)
         self.transition.clear()
         self.actor.reset(dones)
         self.critic.reset(dones)
-
-    def _augment_transition(self) -> None:
-        t = self.transition
-        elements = self.G.elements[1:]
-
-        t.observations = self._augment_observations(t.observations)
-        t.actions = torch.cat(
-            [t.actions] + [self.actor_out_type.transform_fibers(t.actions, g) for g in elements], dim=0
-        )
-
-        mean, std = t.distribution_params
-        augmented_mean = torch.cat(
-            [mean] + [self.actor_out_type.transform_fibers(mean, g) for g in elements], dim=0
-        )
-        augmented_std = torch.abs(
-            torch.cat([std] + [self.actor_out_type.transform_fibers(std, g) for g in elements], dim=0)
-        )
-        t.distribution_params = (augmented_mean, augmented_std)
-
-        t.actions_log_prob = self._tile(t.actions_log_prob, self.num_replica)
-        t.values = self.critic(t.observations).detach()
-        t.rewards = self._tile(t.rewards, self.num_replica)
-        t.dones = self._tile(t.dones, self.num_replica)
-
-    def _augment_observations(self, obs: TensorDict) -> TensorDict:
-        raw_actor, raw_critic = self._raw_actor, self._raw_critic
-        augmented: dict[str, torch.Tensor] = {}
-        for group_name, value in self._transform_obs_group(obs, raw_actor.obs_groups, self.actor_in_type).items():
-            augmented[group_name] = value
-        for group_name, value in self._transform_obs_group(
-            obs, raw_critic.obs_groups, self.critic_in_type
-        ).items():
-            augmented.setdefault(group_name, value)
-        for key in obs.keys():
-            if key not in augmented:
-                augmented[key] = self._tile(obs[key], self.num_replica)
-
-        batch_size = next(iter(augmented.values())).shape[0]
-        return TensorDict(augmented, batch_size=[batch_size], device=obs.device)
-
-    def _transform_obs_group(
-        self, obs: TensorDict, obs_groups: list[str], in_type: FieldType
-    ) -> dict[str, torch.Tensor]:
-        widths = [obs[group_name].shape[-1] for group_name in obs_groups]
-        flat = torch.cat([obs[group_name] for group_name in obs_groups], dim=-1)
-        replicas = [in_type.transform_fibers(flat, g) for g in self.G.elements[1:]]
-
-        per_group = {group_name: [obs[group_name]] for group_name in obs_groups}
-        for replica in replicas:
-            for group_name, chunk in zip(obs_groups, torch.split(replica, widths, dim=-1)):
-                per_group[group_name].append(chunk)
-        return {group_name: torch.cat(chunks, dim=0) for group_name, chunks in per_group.items()}
-
-    @staticmethod
-    def _tile(value: torch.Tensor, num_replica: int) -> torch.Tensor:
-        return value.repeat(num_replica, *([1] * (value.dim() - 1)))
 
     def compute_returns(self, obs: TensorDict, last_action: torch.Tensor | None = None) -> None:
         st = self.storage
         if last_action is not None:
             obs.set("koopman_prediction", self.dae_predict(obs, last_action))
 
-        last_values = self.critic(self._augment_observations(obs)).detach()
+        last_values = self.critic(obs).detach()
 
         advantage = 0
         for step in reversed(range(st.num_transitions_per_env)):
@@ -423,191 +276,3 @@ class PPOSymmDAEOnline(SymmPPO):
         st.advantages = st.returns - st.values
         if not self.normalize_advantage_per_mini_batch:
             st.advantages = (st.advantages - st.advantages.mean()) / (st.advantages.std() + 1e-8)
-
-    def update(self) -> dict[str, float]:
-        mean_value_loss = 0
-        mean_surrogate_loss = 0
-        mean_entropy = 0
-        mean_rnd_loss = 0 if self.rnd else None
-        mean_symmetry_loss = 0 if (self.symmetry and self.symmetry.get("data_augmentation_func")) else None
-
-        if self.actor.is_recurrent or self.critic.is_recurrent:
-            generator = self.storage.recurrent_mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
-        else:
-            generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
-
-        for batch in generator:
-            original_batch_size = batch.observations.batch_size[0]
-
-            if self.normalize_advantage_per_mini_batch:
-                with torch.no_grad():
-                    batch.advantages = (batch.advantages - batch.advantages.mean()) / (batch.advantages.std() + 1e-8)
-
-            # --- Empirical Symmetry Augmentation (Only if configured in symmetry_cfg) ---
-            if (
-                self.symmetry
-                and self.symmetry.get("use_data_augmentation", False)
-                and self.symmetry.get("data_augmentation_func")
-            ):
-                data_augmentation_func = self.symmetry["data_augmentation_func"]
-                batch.observations, batch.actions = data_augmentation_func(
-                    obs=batch.observations, actions=batch.actions, env=self.symmetry["_env"]
-                )
-                num_aug = int(batch.observations.batch_size[0] / original_batch_size)
-                batch.old_actions_log_prob = batch.old_actions_log_prob.repeat(num_aug, 1)
-                batch.values = batch.values.repeat(num_aug, 1)
-                batch.advantages = batch.advantages.repeat(num_aug, 1)
-                batch.returns = batch.returns.repeat(num_aug, 1)
-
-            self.actor(batch.observations, masks=batch.masks, hidden_state=batch.hidden_states[0], stochastic_output=True)
-            actions_log_prob_batch = self.actor.get_output_log_prob(batch.actions)
-
-            batch.observations.set("koopman_prediction", self.dae_predict(batch.observations, batch.actions))
-            value_batch = self.critic(batch.observations, masks=batch.masks, hidden_state=batch.hidden_states[1])
-
-            distribution_params = tuple(p[:original_batch_size] for p in self.actor.output_distribution_params)
-            mu_batch = distribution_params[0]
-            sigma_batch = distribution_params[1]
-            entropy_batch = self.actor.output_entropy[:original_batch_size]
-
-            if self.desired_kl is not None and self.schedule == "adaptive":
-                with torch.inference_mode():
-                    old_mu_batch = batch.old_distribution_params[0]
-                    old_sigma_batch = batch.old_distribution_params[1]
-
-                    if getattr(self.actor, "use_log_prob_kl", False):
-                        old_actions_log_prob = batch.old_actions_log_prob.squeeze(-1)
-                        if old_actions_log_prob.shape != actions_log_prob_batch.shape:
-                            old_actions_log_prob = old_actions_log_prob.reshape_as(actions_log_prob_batch)
-                        kl = old_actions_log_prob - actions_log_prob_batch.detach()
-                    elif getattr(self.actor, "use_masked_action_kl", False):
-                        active_dims = (old_sigma_batch > 0.0) & (sigma_batch > 0.0)
-                        old_sigma = old_sigma_batch.clamp_min(1.0e-6)
-                        sigma = sigma_batch.clamp_min(1.0e-6)
-                        kl = torch.sum(
-                            (
-                                torch.log(sigma / old_sigma)
-                                + (torch.square(old_sigma) + torch.square(old_mu_batch - mu_batch))
-                                / (2.0 * torch.square(sigma))
-                                - 0.5
-                            )
-                            * active_dims,
-                            axis=-1,
-                        )
-                    else:
-                        kl = torch.sum(
-                            torch.log(sigma_batch / old_sigma_batch + 1.0e-5)
-                            + (torch.square(old_sigma_batch) + torch.square(old_mu_batch - mu_batch))
-                            / (2.0 * torch.square(sigma_batch))
-                            - 0.5,
-                            axis=-1,
-                        )
-                    kl_mean = torch.mean(kl)
-
-                    if self.is_multi_gpu:
-                        torch.distributed.all_reduce(kl_mean, op=torch.distributed.ReduceOp.SUM)
-                        kl_mean /= self.gpu_world_size
-
-                    if self.gpu_global_rank == 0:
-                        if kl_mean > self.desired_kl * 2.0:
-                            self.learning_rate = max(1e-5, self.learning_rate / 1.5)
-                        elif kl_mean < self.desired_kl / 2.0 and kl_mean > 0.0:
-                            self.learning_rate = min(1e-2, self.learning_rate * 1.5)
-
-                    if self.is_multi_gpu:
-                        lr_tensor = torch.tensor(self.learning_rate, device=self.device)
-                        torch.distributed.broadcast(lr_tensor, src=0)
-                        self.learning_rate = lr_tensor.item()
-
-                    for param_group in self.optimizer.param_groups:
-                        param_group["lr"] = self.learning_rate
-
-            ratio = torch.exp(actions_log_prob_batch - torch.squeeze(batch.old_actions_log_prob))
-            surrogate = -torch.squeeze(batch.advantages) * ratio
-            surrogate_clipped = -torch.squeeze(batch.advantages) * torch.clamp(
-                ratio, 1.0 - self.clip_param, 1.0 + self.clip_param
-            )
-            surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
-
-            if self.use_clipped_value_loss:
-                value_clipped = batch.values + (value_batch - batch.values).clamp(-self.clip_param, self.clip_param)
-                value_losses = (value_batch - batch.returns).pow(2)
-                value_losses_clipped = (value_clipped - batch.returns).pow(2)
-                value_loss = torch.max(value_losses, value_losses_clipped).mean()
-            else:
-                value_loss = (batch.returns - value_batch).pow(2).mean()
-
-            loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
-
-            # --- Empirical Mirror Loss (Only if configured in symmetry_cfg) ---
-            if self.symmetry and self.symmetry.get("data_augmentation_func"):
-                data_augmentation_func = self.symmetry["data_augmentation_func"]
-                if not self.symmetry.get("use_data_augmentation", False):
-                    obs_batch, _ = data_augmentation_func(obs=batch.observations, actions=None, env=self.symmetry["_env"])
-                else:
-                    obs_batch = batch.observations
-
-                mean_actions_batch = self.actor(obs_batch.detach().clone())
-                action_mean_orig = mean_actions_batch[:original_batch_size]
-                _, actions_mean_symm_batch = data_augmentation_func(
-                    obs=None, actions=action_mean_orig, env=self.symmetry["_env"]
-                )
-
-                mse_loss = torch.nn.MSELoss()
-                symmetry_loss = mse_loss(
-                    mean_actions_batch[original_batch_size:], actions_mean_symm_batch.detach()[original_batch_size:]
-                )
-
-                if self.symmetry.get("use_mirror_loss", False):
-                    loss += self.symmetry["mirror_loss_coeff"] * symmetry_loss
-                else:
-                    symmetry_loss = symmetry_loss.detach()
-
-            if self.rnd:
-                with torch.no_grad():
-                    rnd_state_batch = self.rnd.state_normalizer(
-                        self.rnd.get_rnd_state(batch.observations[:original_batch_size])
-                    )
-                predicted_embedding = self.rnd.predictor(rnd_state_batch)
-                target_embedding = self.rnd.target(rnd_state_batch).detach()
-                rnd_loss = torch.nn.MSELoss()(predicted_embedding, target_embedding)
-
-            self.optimizer.zero_grad()
-            loss.backward()
-
-            if self.rnd and hasattr(self.rnd, "optimizer"):
-                self.rnd.optimizer.zero_grad()
-                rnd_loss.backward()
-
-            if self.is_multi_gpu:
-                self.reduce_parameters()
-
-            import torch.nn.utils as nn_utils
-            nn_utils.clip_grad_norm_(chain(self.actor.parameters(), self.critic.parameters()), self.max_grad_norm)
-            self.optimizer.step()
-
-            if self.rnd and hasattr(self.rnd, "optimizer"):
-                self.rnd.optimizer.step()
-
-            mean_value_loss += value_loss.item()
-            mean_surrogate_loss += surrogate_loss.item()
-            mean_entropy += entropy_batch.mean().item()
-            if mean_rnd_loss is not None:
-                mean_rnd_loss += rnd_loss.item()
-            if mean_symmetry_loss is not None:
-                mean_symmetry_loss += symmetry_loss.item()
-
-        num_updates = self.num_learning_epochs * self.num_mini_batches
-        self.storage.clear()
-
-        loss_dict = {
-            "value": mean_value_loss / num_updates,
-            "surrogate": mean_surrogate_loss / num_updates,
-            "entropy": mean_entropy / num_updates,
-        }
-        if self.rnd:
-            loss_dict["rnd"] = mean_rnd_loss / num_updates
-        if self.symmetry and mean_symmetry_loss is not None:
-            loss_dict["symmetry"] = mean_symmetry_loss / num_updates
-
-        return loss_dict

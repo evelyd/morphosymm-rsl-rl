@@ -250,7 +250,7 @@ class KoopmanEstimator(nn.Module):
         # compute Koopman operator with Gramians
         G_x = (Phi_x @ Phi_x.T)
         G_xy = (Phi_y @ Phi_x.T)
-        self.Gbar_x = self.Gbar_x+ G_x
+        self.Gbar_x = self.Gbar_x + G_x
         self.Gbar_xy = self.Gbar_xy + G_xy
 
         # --- Koopman Operator Computation ---

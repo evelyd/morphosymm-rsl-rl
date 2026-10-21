@@ -142,6 +142,15 @@ class SymmDAEOnPolicyRunner(OnPolicyRunner):
                     batch_latent_states = self.alg.rff(batch_states_raw.to(self.device))
                     self.alg.latent_normalizer.update(batch_latent_states)
 
+                if hasattr(self.alg, "koopman_estimator") and len(self.alg.replay_buffer) > 0:
+                    self.alg.koopman_estimator.compute_koopman_op(
+                        batch_states_raw,
+                        batch_actions_raw,
+                        batch_next_states_raw,
+                    )
+                with torch.inference_mode():
+                    self.env.reset()
+
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False) -> None:
         """Custom learning loop integrating online DAE/Koopman training updates."""
         if "rff" in self.task and self.logger.log_dir is not None:
@@ -224,11 +233,25 @@ class SymmDAEOnPolicyRunner(OnPolicyRunner):
                 else:
                     self.alg.compute_returns(obs)
 
-                if "rff_koopman" in self.task:
-                    koopman_computation_start_time = time.time()
-                    self.alg.koopman_estimator.compute_koopman_op(batch_states_new, batch_actions_new, batch_next_states_new)
-                    pred_error = self.alg.koopman_estimator.compute_pred_error(batch_states_new, batch_actions_new, batch_next_states_new)
-                    koopman_computation_time = time.time() - koopman_computation_start_time
+            loss_dict = self.alg.update()
+            learn_time = time.time() - start
+
+            if "rff_koopman" in self.task:
+                koopman_computation_start_time = time.time()
+                self.alg.koopman_estimator.compute_koopman_op(batch_states_new, batch_actions_new, batch_next_states_new)
+                pred_error = self.alg.koopman_estimator.compute_pred_error(batch_states_new, batch_actions_new, batch_next_states_new)
+                koopman_computation_time = time.time() - koopman_computation_start_time
+
+            if "dae" in self.task:
+                loss_dict.update({"dae_loss": mean_dae_loss, "dae_obs_pred_loss": mean_dae_obs_pred_loss,
+                                  "dae_state_rec_loss": mean_dae_state_rec_loss, "dae_state_pred_loss": mean_dae_state_pred_loss,
+                                  "dae_train_time": dae_train_time})
+
+            if "rff_koopman" in self.task:
+                a_matrix = self.alg.koopman_estimator.K_matrix[:, :self.alg.koopman_estimator.feature_dim].detach()
+                eigvals = torch.linalg.eigvals(a_matrix)
+                loss_dict.update({"koopman_computation_time": koopman_computation_time, "koopman_pred_error": pred_error,
+                                  "max_eigval": torch.max(torch.abs(eigvals)).item(), "min_eigval": torch.min(torch.abs(eigvals)).item()})
 
             if "dae" in self.task:
                 if len(self.alg.replay_buffer) >= self.koopman_cfg["mini_batch_size"]:
@@ -293,20 +316,6 @@ class SymmDAEOnPolicyRunner(OnPolicyRunner):
                         mean_dae_loss, mean_dae_obs_pred_loss, mean_dae_state_rec_loss, mean_dae_state_pred_loss = 0.0, 0.0, 0.0, 0.0
 
                     dae_train_time = time.time() - dae_training_start_time
-
-            loss_dict = self.alg.update()
-            learn_time = time.time() - start
-
-            if "dae" in self.task:
-                loss_dict.update({"dae_loss": mean_dae_loss, "dae_obs_pred_loss": mean_dae_obs_pred_loss,
-                                  "dae_state_rec_loss": mean_dae_state_rec_loss, "dae_state_pred_loss": mean_dae_state_pred_loss,
-                                  "dae_train_time": dae_train_time})
-
-            if "rff_koopman" in self.task:
-                a_matrix = self.alg.koopman_estimator.K_matrix[:, :self.alg.koopman_estimator.feature_dim].detach()
-                eigvals = torch.linalg.eigvals(a_matrix)
-                loss_dict.update({"koopman_computation_time": koopman_computation_time, "koopman_pred_error": pred_error,
-                                  "max_eigval": torch.max(torch.abs(eigvals)).item(), "min_eigval": torch.min(torch.abs(eigvals)).item()})
 
             self.current_learning_iteration = it
             action_std = self.alg.actor.output_distribution_params[1] if hasattr(self.alg.actor, 'output_distribution_params') else None
