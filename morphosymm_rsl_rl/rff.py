@@ -256,7 +256,11 @@ class KoopmanEstimator(nn.Module):
         # --- Koopman Operator Computation ---
         # Regularization term
         self.reg = self.gamma * torch.eye(Phi_x.shape[0], device=self.device)
-        K = self.Gbar_xy @ torch.linalg.pinv(self.Gbar_x + self.reg, rcond=0.95, hermitian=True)
+        # K = self.Gbar_xy @ torch.linalg.pinv(self.Gbar_x + self.reg, rcond=0.95, hermitian=True)
+        K = torch.linalg.solve(
+            self.Gbar_x + self.reg,
+            self.Gbar_xy.T,
+        ).T
 
         # Store the computed operator and return
         self.K_matrix = K

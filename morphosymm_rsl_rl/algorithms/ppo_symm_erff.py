@@ -264,6 +264,20 @@ class PPOSymmERFF(SymmPPO):
         return iteration
 
     def rff_predict(self, obs: TensorDict, action: torch.Tensor | None = None) -> torch.Tensor:
+        latent_raw = self._raw_latent(obs)
+
+        if action is not None and "koopman" in self.task:
+            next_latent = self.koopman_estimator.predict_from_lifted_state(
+                escnn.nn.GeometricTensor(latent_raw, self.rff.out_type), action
+            )
+        else:
+            next_latent = latent_raw
+
+        if hasattr(next_latent, "tensor"):
+            next_latent = next_latent.tensor
+        return next_latent
+
+    def _raw_latent(self, obs: TensorDict) -> torch.Tensor:
         critic_obs = obs["critic"]
         dae_input = critic_obs[
             :,
@@ -272,22 +286,15 @@ class PPOSymmERFF(SymmPPO):
 
         dae_input = escnn.nn.GeometricTensor(dae_input, self.state_type)
         latent_raw = self.rff(dae_input)
-
-        if action is not None and "koopman" in self.task:
-            next_latent = self.koopman_estimator.predict_from_lifted_state(latent_raw, action)
-        else:
-            next_latent = latent_raw
-
-        if hasattr(next_latent, 'tensor'):
-            next_latent = next_latent.tensor
-        return next_latent
+        return latent_raw.tensor if hasattr(latent_raw, "tensor") else latent_raw
 
     def act(self, obs: TensorDict) -> torch.Tensor:
         if self.actor.is_recurrent:
             self.transition.hidden_states = (self.actor.get_hidden_state(), self.critic.get_hidden_state())
 
         self.transition.actions = self.actor(obs, stochastic_output=True).detach()
-        obs.set("koopman_prediction", self.rff_predict(obs, self.transition.actions))
+        mean_actions = self.actor.output_distribution_params[0].detach()
+        obs.set("koopman_prediction", self.rff_predict(obs, mean_actions))
 
         self.transition.values = self.critic(obs).detach()
         self.transition.actions_log_prob = self.actor.get_output_log_prob(self.transition.actions).detach()
@@ -323,7 +330,8 @@ class PPOSymmERFF(SymmPPO):
     def compute_returns(self, obs: TensorDict, last_action: torch.Tensor | None = None) -> None:
         st = self.storage
         if last_action is not None:
-            obs.set("koopman_prediction", self.rff_predict(obs, last_action))
+            mean_last_action = self.actor(obs, stochastic_output=False).detach()
+            obs.set("koopman_prediction", self.rff_predict(obs, mean_last_action))
         else:
             obs.set("koopman_prediction", self.rff_predict(obs, None))
 
